@@ -9,10 +9,14 @@ Vibe-coded macOS menu bar app. Swift + SwiftUI, no external dependencies, no net
 ## Install
 
 ```bash
-brew install --cask milan0x/tap/micguard
+brew tap milan0x/tap
 ```
 
-No separate `brew tap` step needed, the command adds the tap automatically. Homebrew installs the same Apple-notarized DMG that ships on [Releases](../../releases), so it opens without Gatekeeper warnings.
+```bash
+brew install --cask micguard
+```
+
+Homebrew installs the same Apple-notarized DMG that ships on [Releases](../../releases), so it opens without Gatekeeper warnings.
 
 Or download the notarized build from [Releases](../../releases) yourself, open the DMG, drag to Applications.
 
@@ -20,8 +24,9 @@ Or build it from source:
 
 ```bash
 swift build
-# or open the package in Xcode
 ```
+
+Or open the package in Xcode.
 
 ## What it does
 
