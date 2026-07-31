@@ -8,6 +8,8 @@ Vibe-coded macOS menu bar app. Swift + SwiftUI, no external dependencies, no net
 
 ## Install
 
+Homebrew installs the same Apple-notarized DMG that ships on [Releases](../../releases), so it opens without Gatekeeper warnings.
+
 ```bash
 brew tap milan0x/tap
 ```
@@ -15,8 +17,6 @@ brew tap milan0x/tap
 ```bash
 brew install --cask micguard
 ```
-
-Homebrew installs the same Apple-notarized DMG that ships on [Releases](../../releases), so it opens without Gatekeeper warnings.
 
 Or download the notarized build from [Releases](../../releases) yourself, open the DMG, drag to Applications.
 
