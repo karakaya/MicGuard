@@ -14,6 +14,7 @@
 		252B26D576F0AF1359C11D97 /* OutputDeviceWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A0A7A0D04087851FF0A344 /* OutputDeviceWatchdogTests.swift */; };
 		2B6FFA37D11AE09E9F5211D5 /* AudioDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BE9DA3D097A383FD554197 /* AudioDeviceManager.swift */; };
 		2D0C28F08E4E2189671AF32A /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026BA6A21433C1568EAAE69D /* StatusBarController.swift */; };
+		2E0D94445F000B1BAEA7AEFE /* ClamshellMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA5DE403CE3D4262B9F9A2E /* ClamshellMonitor.swift */; };
 		377FBE04435A4F710B7C8664 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF58486181BD7EAC6339A19D /* AppDelegate.swift */; };
 		3F37E64541024A1935A4EE79 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2E6D040238D0366F8D854022 /* ServiceManagement.framework */; };
 		4A788FB92EC420295BCD1913 /* PopoverContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58A53A63F92F43E8D9A9A49D /* PopoverContentView.swift */; };
@@ -58,6 +59,7 @@
 		2E6D040238D0366F8D854022 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = ServiceManagement.framework; sourceTree = "<group>"; };
 		2F63A1260DED312BCCD8C589 /* StatsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsManager.swift; sourceTree = "<group>"; };
 		48A2E83C7C0A1552B059E390 /* ProcessMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessMonitor.swift; sourceTree = "<group>"; };
+		4AA5DE403CE3D4262B9F9A2E /* ClamshellMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClamshellMonitor.swift; sourceTree = "<group>"; };
 		4D855FFC6A0E3F07DF4B3338 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		50DAFF48FD3D51FF1E0BB7C6 /* MicGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicGuardApp.swift; sourceTree = "<group>"; };
 		5402F144B596FE9D04B12231 /* DeviceWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWatchdog.swift; sourceTree = "<group>"; };
@@ -115,6 +117,7 @@
 			children = (
 				BE7ED869E2FB562761102E7E /* ActivityMonitor.swift */,
 				27BE9DA3D097A383FD554197 /* AudioDeviceManager.swift */,
+				4AA5DE403CE3D4262B9F9A2E /* ClamshellMonitor.swift */,
 				5402F144B596FE9D04B12231 /* DeviceWatchdog.swift */,
 				48A2E83C7C0A1552B059E390 /* ProcessMonitor.swift */,
 				5F9EF3670D38515CF80725F1 /* VolumeGuard.swift */,
@@ -267,7 +270,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					8FC2CF6A1F4A57865989BDCF = {
 						ProvisioningStyle = Automatic;
@@ -302,6 +305,7 @@
 				FA5881E4AF863D54EA5C02A6 /* ActivityMonitor.swift in Sources */,
 				377FBE04435A4F710B7C8664 /* AppDelegate.swift in Sources */,
 				2B6FFA37D11AE09E9F5211D5 /* AudioDeviceManager.swift in Sources */,
+				2E0D94445F000B1BAEA7AEFE /* ClamshellMonitor.swift in Sources */,
 				7DD1F836F15E4352B2D50596 /* DevicePriorityListView.swift in Sources */,
 				5F60D898A14EC0DF001E973C /* DeviceWatchdog.swift in Sources */,
 				2021B0AF5767E6BF4E625390 /* MGLog.swift in Sources */,
@@ -380,11 +384,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -398,7 +400,6 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.9;
@@ -410,7 +411,6 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -457,11 +457,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -482,7 +480,6 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.9;
@@ -497,8 +494,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MQXW376WC6;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -511,7 +506,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LS_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.micguard.app;
 				PRODUCT_NAME = MicGuard;
 				SDKROOT = macosx;
@@ -526,8 +521,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MQXW376WC6;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -540,7 +533,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LS_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.micguard.app;
 				PRODUCT_NAME = MicGuard;
 				SDKROOT = macosx;
@@ -552,7 +545,6 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

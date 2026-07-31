@@ -77,3 +77,14 @@ Layered components with dependency injection and Combine-based reactive communic
 - Volume values: `Float` 0.0–1.0, clamped via `max(0, min(1, value))`
 - `Package.swift` explicitly lists every source file — update it when adding new files
 - UI uses SwiftUI inside the popover and `@MainActor` on `StatusBarController` / `PopoverViewModel`. `OnAirIndicator` still uses AppKit (`NSStatusItem` / `NSImage`) for the menu-bar icon itself.
+
+## Release & Versioning
+
+Full process: [RELEASING.md](RELEASING.md). Releases are cut entirely locally — no CI, no secrets in workflows (same model as local-cloud-browser). Run `scripts/release.sh <version>`: test → version bump → universal build → Developer ID sign → notarize + staple (app and DMG, via the `notarytool` keychain profile) → commit + tag `v<version>` + push → GitHub release with DMG → Homebrew cask bump in [milan0x/homebrew-tap](https://github.com/milan0x/homebrew-tap).
+
+Naming is load-bearing — the cask and the tap's bump workflow parse these exact formats:
+
+- Version `MAJOR.MINOR[.PATCH]`; git tag `v<version>`; `CFBundleShortVersionString` must equal the tag without `v`; `CFBundleVersion` is an integer incremented every release.
+- Release asset must be named `MicGuard-<version>.dmg`, containing `MicGuard.app`, volume name `MicGuard`, release title `MicGuard <version>`.
+- `MicGuard/App/Info.plist` is the version source of truth (`GENERATE_INFOPLIST_FILE: false`); `project.yml`'s `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` are kept in sync by the release script but are not authoritative.
+- The tap's `bump.yml` cron derives the download URL from the cask's `url` template + latest release tag — renaming the asset or changing the tag scheme silently breaks cask updates.

@@ -7,6 +7,7 @@ See [AI_CONTEXT.md](AI_CONTEXT.md) for full project context, architecture, data 
 ```bash
 swift build          # Build via SPM
 swift test           # Run all tests
+scripts/release.sh 1.3   # Cut a release locally: build, notarize, DMG, GitHub release (see RELEASING.md)
 ```
 
 - The menu-bar UI is a SwiftUI popover (`MicGuard/UI/MenuPopover/`) hosted in an `NSPopover`. State lives on `PopoverViewModel` (`@MainActor ObservableObject`).
