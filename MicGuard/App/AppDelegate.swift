@@ -7,17 +7,19 @@
 
 import Cocoa
 import Combine
+import CoreAudio
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    
+
     // MARK: - Properties
-    
+
     private var statusBarController: StatusBarController?
     private var audioDeviceManager: AudioDeviceManager?
     private var deviceWatchdog: DeviceWatchdog?
     private var outputDeviceWatchdog: OutputDeviceWatchdog?
     private var volumeGuard: VolumeGuard?
     private var activityMonitor: ActivityMonitor?
+    private var clamshellMonitor: ClamshellMonitor?
     
     private let preferencesManager = PreferencesManager.shared
     private let statsManager = StatsManager.shared
@@ -30,7 +32,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MGLog.debug("[MicGuard.App] === BUILD MARKER 2026-05-15-diag1 — launching ===")
         // Initialize core audio manager
         audioDeviceManager = AudioDeviceManager()
-        
+
+        // Lid tracking — in clamshell mode the built-in mic stays enumerated but
+        // is physically unusable; the input watchdog must fall through past it.
+        clamshellMonitor = ClamshellMonitor()
+        clamshellMonitor?.onLidStateChanged = { [weak self] closed in
+            guard let self = self else { return }
+            MGLog.debug("[MicGuard.AppDelegate] clamshell changed closed=\(closed) — re-evaluating input routing")
+            let beforeUID = self.audioDeviceManager?.defaultInputDevice?.uid
+            self.deviceWatchdog?.reevaluateEnforcement()
+            self.handleInputAutoSwitch()
+            self.updateActivityMonitorDeviceOverride()
+            // Tell the user why their mic just changed — but only when the lid
+            // event actually rerouted input. A lid flip with no routing change
+            // stays silent. Called last so it preempts any auto-switch flash.
+            let afterUID = self.audioDeviceManager?.defaultInputDevice?.uid
+            if beforeUID != afterUID {
+                self.statusBarController?.flashLabel(closed ? "LID CLOSED" : "LID OPENED", background: .systemGreen)
+            }
+        }
+
         // Initialize watchdogs and guards
         setupDeviceWatchdog()
         setupOutputDeviceWatchdog()
@@ -74,6 +95,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         deviceWatchdog = DeviceWatchdog(audioDeviceManager: audioManager)
         deviceWatchdog?.autoYieldEnabled = preferencesManager.autoYieldOnRepeatedOverride
         deviceWatchdog?.autoResumeEnabled = preferencesManager.autoResumeOnTopPriorityPick
+        deviceWatchdog?.isDeviceUsable = { [weak self] device in
+            self?.isUsableInput(device) ?? true
+        }
 
         // Wire up name-based device matching
         deviceWatchdog?.nameForUID = { [weak self] uid in
@@ -219,12 +243,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func setupNotificationObservers() {
-        // Auto-switch output device on connect
+        // Auto-switch output device on connect. Also refresh the ActivityMonitor
+        // override — a stale device reference there breaks meeting-end detection.
         audioDeviceManager?.devicesChangedPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
                 self?.handleInputAutoSwitch()
                 self?.handleOutputAutoSwitch()
+                self?.updateActivityMonitorDeviceOverride()
             }
             .store(in: &cancellables)
 
@@ -301,6 +327,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    /// A device the input watchdog / auto-switch may route to. The built-in mic
+    /// is physically unusable while the lid is closed even though CoreAudio
+    /// keeps it enumerated and alive.
+    private func isUsableInput(_ device: AudioDevice) -> Bool {
+        guard clamshellMonitor?.isLidClosed == true else { return true }
+        return device.transportType != kAudioDeviceTransportTypeBuiltIn
+    }
+
     private func handleInputAutoSwitch() {
         guard preferencesManager.inputAutoSwitchEnabled,
               let audioManager = audioDeviceManager else { return }
@@ -310,13 +344,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         var bestDevice: AudioDevice?
         for uid in priorityOrder {
-            if let device = audioManager.device(forUID: uid), device.isInput {
+            if let device = audioManager.device(forUID: uid), device.isInput, isUsableInput(device) {
                 bestDevice = device
                 break
             }
             if let name = preferencesManager.cachedDeviceName(for: uid) {
                 let matches = audioManager.inputDevices(withName: name)
-                if matches.count == 1 {
+                if matches.count == 1, isUsableInput(matches[0]) {
                     bestDevice = matches[0]
                     preferencesManager.replaceDeviceUID(oldUID: uid, newUID: matches[0].uid)
                     break
@@ -328,10 +362,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let current = audioManager.defaultInputDevice,
               current.uid != target.uid else { return }
 
-        MGLog.debug("[MicGuard.AppDelegate] INPUT HELD (auto-switch) — \(current.name) → \(target.name)")
+        // Auto-switch is MicGuard routing to a preferred device on connect — not a
+        // blocked hijack. Green feedback, no hijack stat.
+        MGLog.debug("[MicGuard.AppDelegate] INPUT SWITCHED (auto-switch) — \(current.name) → \(target.name)")
         _ = audioManager.setDefaultInputDevice(target)
-        statsManager.increment(stat: .hijacksBlocked)
-        statusBarController?.flashLabel("INPUT HELD")
+        statusBarController?.flashLabel("INPUT SWITCHED", background: .systemGreen)
     }
 
     private func applyDefaultVolumeIfSet(for device: AudioDevice?) {
@@ -371,10 +406,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let current = audioManager.defaultOutputDevice,
               current.uid != target.uid else { return }
 
-        MGLog.debug("[MicGuard.AppDelegate] OUTPUT HELD (auto-switch) — \(current.name) → \(target.name)")
+        MGLog.debug("[MicGuard.AppDelegate] OUTPUT SWITCHED (auto-switch) — \(current.name) → \(target.name)")
         _ = audioManager.setDefaultOutputDevice(target)
-        statsManager.increment(stat: .outputHijacksBlocked)
-        statusBarController?.flashLabel("OUTPUT HELD")
+        statusBarController?.flashLabel("OUTPUT SWITCHED", background: .systemGreen)
     }
 
     /// Tells ActivityMonitor which device to treat as the "in use" source for the On Air indicator.
@@ -388,13 +422,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let priorityOrder = preferencesManager.preferredInputDeviceOrder
         for uid in priorityOrder {
-            if let device = audioDeviceManager?.device(forUID: uid), device.isInput {
+            if let device = audioDeviceManager?.device(forUID: uid), device.isInput, isUsableInput(device) {
                 activityMonitor?.overrideMonitoredDevice = device
                 MGLog.debug("[MicGuard.App] override set to \(device.name)")
                 return
             }
             if let name = preferencesManager.cachedDeviceName(for: uid),
-               let device = audioDeviceManager?.inputDevices(withName: name).first {
+               let device = audioDeviceManager?.inputDevices(withName: name).first,
+               isUsableInput(device) {
                 activityMonitor?.overrideMonitoredDevice = device
                 MGLog.debug("[MicGuard.App] override set to \(device.name) (name-matched)")
                 return

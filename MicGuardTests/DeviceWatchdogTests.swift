@@ -384,6 +384,116 @@ final class DeviceWatchdogTests: XCTestCase {
         XCTAssertEqual(capturedCount, 2)
     }
 
+    // MARK: - System-Initiated Routing Tests
+
+    func testNoHijackCallbackDuringDeviceListFlux() {
+        // OS-initiated routing right after a device-list change must revert
+        // silently: no "INPUT HELD" flash, no hijack stat.
+        let preferredDevice = mockAudioManager.inputDevices.first { $0.uid == "ShureMV7" }!
+        let hijackDevice = mockAudioManager.inputDevices.first { $0.uid == "AirPodsPro" }!
+
+        mockAudioManager.setDefaultInputDevice(preferredDevice)
+        watchdog.startWatching(devicePriorityOrder: [preferredDevice.uid])
+        mockAudioManager.setDefaultInputDeviceCalls.removeAll()
+
+        var hijackAnnounced = false
+        watchdog.onDeviceHijackBlocked = { _, _ in
+            hijackAnnounced = true
+        }
+
+        // Device-list change opens the flux window, then macOS re-routes.
+        mockAudioManager.devicesChangedPublisher.send()
+        mockAudioManager.simulateDeviceSwitch(to: hijackDevice)
+
+        let expectation = XCTestExpectation(description: "Wait for enforcement")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertFalse(hijackAnnounced,
+                       "Should not announce hijack for system-initiated routing inside flux window")
+        XCTAssertTrue(mockAudioManager.setDefaultInputDeviceCalls.contains { $0.uid == preferredDevice.uid },
+                      "Should still silently revert to preferred device")
+    }
+
+    // MARK: - Direction Matching Tests
+
+    func testInputWatchdogIgnoresOutputOnlyDeviceWithSameUID() {
+        // A UID that only exists as an output device must not be selected by the
+        // input watchdog — device(forUID:) searches both lists.
+        let fallback = mockAudioManager.inputDevices.first { $0.uid == "ShureMV7" }!
+        mockAudioManager.setDefaultInputDevice(fallback)
+        mockAudioManager.setDefaultInputDeviceCalls.removeAll()
+
+        // "BuiltInSpeakers" is output-only in the mock. Priority: speakers > shure.
+        watchdog.startWatching(devicePriorityOrder: ["BuiltInSpeakers", fallback.uid])
+
+        let expectation = XCTestExpectation(description: "Wait for enforcement")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertFalse(mockAudioManager.setDefaultInputDeviceCalls.contains { $0.uid == "BuiltInSpeakers" },
+                       "Input watchdog must never set an output-only device as default input")
+    }
+
+    // MARK: - Usability Filter Tests (clamshell fallthrough)
+
+    func testSkipsUnusableDeviceAndFallsThrough() {
+        // Simulates clamshell mode: built-in mic enumerated but flagged unusable —
+        // watchdog should enforce the next priority device instead.
+        let builtIn = mockAudioManager.inputDevices.first { $0.uid == "BuiltInMicrophone" }!
+        let fallback = mockAudioManager.inputDevices.first { $0.uid == "ShureMV7" }!
+
+        watchdog.isDeviceUsable = { $0.uid != builtIn.uid }
+        mockAudioManager.setDefaultInputDevice(builtIn)
+        mockAudioManager.setDefaultInputDeviceCalls.removeAll()
+
+        watchdog.startWatching(devicePriorityOrder: [builtIn.uid, fallback.uid])
+
+        let expectation = XCTestExpectation(description: "Wait for fallthrough")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertTrue(mockAudioManager.setDefaultInputDeviceCalls.contains { $0.uid == fallback.uid },
+                      "Should fall through to next priority device when top is unusable")
+        XCTAssertFalse(mockAudioManager.setDefaultInputDeviceCalls.contains { $0.uid == builtIn.uid },
+                       "Should not enforce the unusable device")
+    }
+
+    func testDoesNotFightWhenOnlyUnusableDeviceInPriority() {
+        // Lid closed, priority holds only the built-in mic: selectBestDevice falls
+        // back to the system default → watchdog must not fight the OS.
+        let builtIn = mockAudioManager.inputDevices.first { $0.uid == "BuiltInMicrophone" }!
+        let osChoice = mockAudioManager.inputDevices.first { $0.uid == "AirPodsPro" }!
+
+        watchdog.isDeviceUsable = { $0.uid != builtIn.uid }
+        watchdog.startWatching(devicePriorityOrder: [builtIn.uid])
+        mockAudioManager.setDefaultInputDeviceCalls.removeAll()
+
+        var hijackAnnounced = false
+        watchdog.onDeviceHijackBlocked = { _, _ in
+            hijackAnnounced = true
+        }
+
+        // OS routes away from the dead built-in mic.
+        mockAudioManager.simulateDeviceSwitch(to: osChoice)
+
+        let expectation = XCTestExpectation(description: "Wait")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertFalse(hijackAnnounced, "Should not flash INPUT HELD when preferred device is unusable")
+        XCTAssertFalse(mockAudioManager.setDefaultInputDeviceCalls.contains { $0.uid == builtIn.uid },
+                       "Should not try to re-enforce the unusable device")
+    }
+
     func testNoAmbiguousCallbackForSingleMatch() {
         watchdog.nameForUID = { uid in
             if uid == "ShureMV7" { return "Shure MV7" }

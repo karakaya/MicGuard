@@ -231,14 +231,21 @@ class VolumeGuard: VolumeGuardProtocol {
         
         // Debounce the correction
         debounceWorkItem?.cancel()
-        
+
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            
+
+            // Re-fetch at fire time: the default device may have changed (or gone)
+            // during the debounce window, and the drift may already be resolved.
+            guard self.isGuarding,
+                  let device = self.audioDeviceManager.defaultInputDevice,
+                  let currentVolume = self.audioDeviceManager.getInputVolume(for: device),
+                  abs(currentVolume - self.targetVolume) > self.volumeTolerance else { return }
+
             self.isSettingVolume = true
             let success = self.audioDeviceManager.setInputVolume(self.targetVolume, for: device)
             self.isSettingVolume = false
-            
+
             if success {
                 self.recordCorrection()
                 self.onVolumeCorrected?(currentVolume, self.targetVolume)

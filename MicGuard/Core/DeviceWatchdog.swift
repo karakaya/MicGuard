@@ -95,6 +95,11 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
     var setDefaultDevice: ((AudioDevice) -> Bool)!
     var devicesWithName: ((String) -> [AudioDevice])!
     var selectBestDevice: (() -> AudioDevice?)!
+    var deviceMatchesDirection: ((AudioDevice) -> Bool)!
+
+    /// Optional external usability filter (e.g. clamshell mode makes the built-in
+    /// mic unusable while it stays enumerated). nil means every device is usable.
+    var isDeviceUsable: ((AudioDevice) -> Bool)?
 
     // MARK: - Initialization
 
@@ -164,6 +169,23 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
 
         guard isWatching else { return }
 
+        // Coalesce rapid-fire default-change events (Bluetooth flaps fire several
+        // within milliseconds) so we act once on the settled state.
+        debounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.processDeviceChange()
+        }
+        debounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+    }
+
+    private func processDeviceChange() {
+        guard isWatching else { return }
+
+        // Re-read at fire time — the event's snapshot may be stale after the
+        // debounce delay (device list refreshes race the default-change listener).
+        let newDevice = getDefaultDevice()
+
         // While yielded: check whether the user just navigated back to the top-priority
         // device. If so AND auto-resume is enabled, exit yielded state and resume
         // enforcement. The user's action signals they've "come home" to their preferred.
@@ -177,49 +199,58 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
             return
         }
 
+        // A nil default is a transient state (device list mid-refresh, lid
+        // transition). Don't treat it as a hijack — re-check shortly, silently.
+        guard let currentDevice = newDevice else {
+            MGLog.debug("[MicGuard.Watchdog] processDeviceChange: default unresolved, scheduling re-check")
+            scheduleDelayedCheck(after: 0.3)
+            return
+        }
+
         // Always enforce — including when System Settings is frontmost.
         // Lock means "hold the priority device, period." If the user wants to switch,
         // they can do so via MicGuard's popover (which calls setDefault directly,
         // bypassing this enforcement path because the new device becomes #1 priority).
 
         guard let bestDevice = selectBestDevice() else {
-            MGLog.debug("[MicGuard.Watchdog] handleDeviceChange: selectBestDevice returned nil — priority=\(devicePriorityOrder)")
+            MGLog.debug("[MicGuard.Watchdog] processDeviceChange: selectBestDevice returned nil — priority=\(devicePriorityOrder)")
             return
         }
 
-        MGLog.debug("[MicGuard.Watchdog] handleDeviceChange bestDevice=\(bestDevice.name) priorityOrder=\(devicePriorityOrder)")
+        MGLog.debug("[MicGuard.Watchdog] processDeviceChange bestDevice=\(bestDevice.name) priorityOrder=\(devicePriorityOrder)")
 
         // If the user has changed the default away from our preferred device, see
         // whether they've done it repeatedly. If so, yield instead of fighting.
-        if newDevice?.uid != bestDevice.uid {
-            if shouldYieldToRepeatedOverride() {
+        if currentDevice.uid != bestDevice.uid {
+            // Default changes right after a device-list change are macOS re-routing
+            // (notably AirPods finishing HFP negotiation 2-5s after connect), not
+            // user clicks: revert silently and don't count toward the yield threshold.
+            let systemInitiated = isInDeviceListFluxWindow
+            if !systemInitiated, shouldYieldToRepeatedOverride() {
                 isYielded = true
                 recentHijackTimestamps.removeAll()
                 MGLog.debug("[MicGuard.Watchdog] yielding — user changed default repeatedly")
-                onYielded?(newDevice?.name ?? "Unknown", bestDevice.name)
+                onYielded?(currentDevice.name, bestDevice.name)
                 return
             }
-            enforcePreferredDevice()
+            enforcePreferredDevice(announce: !systemInitiated)
         }
+    }
+
+    private var isInDeviceListFluxWindow: Bool {
+        guard let fluxStart = lastDeviceListChangeAt else { return false }
+        return Date().timeIntervalSince(fluxStart) < deviceListFluxWindow
     }
 
     /// Returns true when the user has manually overridden the default ≥ N times
     /// inside the yieldWindow, with at least `yieldMinSpread` between events
     /// (filters out millisecond-fast Bluetooth flap storms).
     /// Returns false when `autoYieldEnabled` is off — caller will always revert.
+    /// Caller is responsible for excluding system-initiated changes (flux window).
     private func shouldYieldToRepeatedOverride() -> Bool {
         guard autoYieldEnabled else { return false }
 
         let now = Date()
-
-        // Hijacks fired right after a device-list change are macOS re-routing
-        // (notably AirPods finishing HFP negotiation 2-5s after connect). Don't
-        // count those — they'd otherwise trip the 2-strikes rule on every connect.
-        if let fluxStart = lastDeviceListChangeAt,
-           now.timeIntervalSince(fluxStart) < deviceListFluxWindow {
-            MGLog.debug("[MicGuard.Watchdog] hijack inside device-list flux window — not counting toward yield")
-            return false
-        }
 
         recentHijackTimestamps.removeAll { now.timeIntervalSince($0) > yieldWindow }
 
@@ -240,6 +271,14 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
         if isWatching {
             enforcePreferredDevice()
         }
+    }
+
+    /// Re-run enforcement against current device availability.
+    /// Used when an external signal changes which devices are usable
+    /// (e.g. clamshell open/close) without any CoreAudio event firing.
+    func reevaluateEnforcement() {
+        guard isWatching, !isYielded else { return }
+        enforcePreferredDevice()
     }
 
     func handleDeviceListChange() {
@@ -275,7 +314,10 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    func enforcePreferredDevice() {
+    /// `announce: true` fires `onDeviceHijackBlocked` (menu-bar flash + stat) —
+    /// only for user-initiated hijacks. System-initiated routing (device-list
+    /// flux, delayed checks, verification timer, startup) enforces silently.
+    func enforcePreferredDevice(announce: Bool = false) {
         guard !isYielded else {
             MGLog.debug("[MicGuard.Watchdog] enforcePreferredDevice: yielded, skipping")
             return
@@ -292,7 +334,7 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
         }
 
         let attemptedDeviceName = currentDefault?.name ?? "Unknown"
-        MGLog.debug("[MicGuard.Watchdog] enforcePreferredDevice: switching from \(attemptedDeviceName) to \(bestDevice.name)")
+        MGLog.debug("[MicGuard.Watchdog] enforcePreferredDevice: switching from \(attemptedDeviceName) to \(bestDevice.name) announce=\(announce)")
 
         let setResult = setDefaultDevice(bestDevice)
         MGLog.debug("[MicGuard.Watchdog] enforcePreferredDevice: setDefaultDevice returned \(setResult)")
@@ -302,7 +344,9 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
             let verifyDefault = getDefaultDevice()
             MGLog.debug("[MicGuard.Watchdog] enforcePreferredDevice: post-set verification, currentDefault=\(verifyDefault?.name ?? "nil")")
 
-            onDeviceHijackBlocked?(attemptedDeviceName, bestDevice.name)
+            if announce {
+                onDeviceHijackBlocked?(attemptedDeviceName, bestDevice.name)
+            }
             // macOS (especially with AirPods) can re-override within milliseconds.
             // Verify the change stuck after a short delay and silently re-apply if needed.
             scheduleEnforcementVerification()
@@ -348,8 +392,11 @@ class BaseDeviceWatchdog: DeviceWatchdogProtocol {
     // MARK: - Name-Based Matching Helpers
 
     /// Try to find a device by UID first, then fall back to name match. Updates UID if matched by name.
+    /// Only returns devices matching this watchdog's direction — `device(forUID:)`
+    /// searches both input and output lists, so an input watchdog must not accept
+    /// an output-only device (and vice versa).
     func findDeviceByUIDOrName(_ uid: String) -> AudioDevice? {
-        if let device = audioDeviceManager.device(forUID: uid) {
+        if let device = audioDeviceManager.device(forUID: uid), deviceMatchesDirection(device) {
             return device
         }
 
@@ -383,13 +430,14 @@ class DeviceWatchdog: BaseDeviceWatchdog {
         getDefaultDevice = { [unowned self] in self.audioDeviceManager.defaultInputDevice }
         setDefaultDevice = { [unowned self] in self.audioDeviceManager.setDefaultInputDevice($0) }
         devicesWithName = { [unowned self] in self.audioDeviceManager.inputDevices(withName: $0) }
+        deviceMatchesDirection = { $0.isInput }
         selectBestDevice = { [unowned self] in self.selectBestAvailableDevice() }
     }
 
     /// Select the best available device from the priority list
     private func selectBestAvailableDevice() -> AudioDevice? {
         for uid in devicePriorityOrder {
-            if let device = findDeviceByUIDOrName(uid) {
+            if let device = findDeviceByUIDOrName(uid), isDeviceUsable?(device) ?? true {
                 return device
             }
         }
@@ -409,13 +457,14 @@ class OutputDeviceWatchdog: BaseDeviceWatchdog {
         getDefaultDevice = { [unowned self] in self.audioDeviceManager.defaultOutputDevice }
         setDefaultDevice = { [unowned self] in self.audioDeviceManager.setDefaultOutputDevice($0) }
         devicesWithName = { [unowned self] in self.audioDeviceManager.outputDevices(withName: $0) }
+        deviceMatchesDirection = { $0.isOutput }
         selectBestDevice = { [unowned self] in self.selectPreferredDevice() }
     }
 
     /// Select the best available output device from the priority list
     private func selectPreferredDevice() -> AudioDevice? {
         for uid in devicePriorityOrder {
-            if let device = findDeviceByUIDOrName(uid) {
+            if let device = findDeviceByUIDOrName(uid), isDeviceUsable?(device) ?? true {
                 return device
             }
         }

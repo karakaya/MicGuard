@@ -119,6 +119,7 @@ final class PopoverViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refreshDeviceLists()
+                self?.refreshStatusLine()
             }
             .store(in: &cancellables)
 
@@ -134,6 +135,7 @@ final class PopoverViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refreshDeviceLists()
+                self?.refreshStatusLine()
             }
             .store(in: &cancellables)
 
@@ -288,6 +290,9 @@ final class PopoverViewModel: ObservableObject {
                 if nameMatches.count == 1 {
                     device = nameMatches[0]
                     replaceUID(uid, nameMatches[0].uid)
+                    // New UID = re-enumerated hardware; drop the session "unsettable"
+                    // flag so the device gets a clean retry (re-flagged if refused again).
+                    unsettableUIDs.remove(uid)
                 }
             }
             ordered.append(Resolved(device: device, uid: device?.uid ?? uid))
@@ -411,9 +416,9 @@ final class PopoverViewModel: ObservableObject {
         if order.first != uid {
             preferencesManager.moveDevice(uid: uid, direction: .toTop)
         }
+        // The .preferredInputDeviceChanged subscription refreshes device lists
+        // and the status line — no explicit refresh needed here.
         NotificationCenter.default.post(name: .preferredInputDeviceChanged, object: uid)
-        refreshDeviceLists()
-        refreshStatusLine()
     }
 
     /// Snap the system default input to the top connected device in priority order.
@@ -515,9 +520,9 @@ final class PopoverViewModel: ObservableObject {
         if order.first != uid {
             preferencesManager.moveOutputDevice(uid: uid, direction: .toTop)
         }
+        // The defaultOutputChanged + .preferredOutputDeviceChanged subscriptions
+        // refresh device lists and the status line — no explicit refresh needed here.
         NotificationCenter.default.post(name: .preferredOutputDeviceChanged, object: uid)
-        refreshDeviceLists()
-        refreshStatusLine()
     }
 
     /// Snap the system default output to the top connected device in priority order.

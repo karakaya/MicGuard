@@ -19,6 +19,7 @@ let package = Package(
                 "App/MicGuardApp.swift",
                 "App/AppDelegate.swift",
                 "Core/AudioDeviceManager.swift",
+                "Core/ClamshellMonitor.swift",
                 "Core/DeviceWatchdog.swift",
                 "Core/VolumeGuard.swift",
                 "Core/ActivityMonitor.swift",
@@ -35,6 +36,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("IOKit"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("ServiceManagement")

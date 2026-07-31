@@ -55,6 +55,9 @@ class OnAirIndicator {
         flashTimer?.invalidate()
         isFlashing = true
         flashCount = 0
+        // Show the label immediately — the timer then alternates hide/show.
+        // (Starting hidden would leave a blank menu-bar slot for the first cycle.)
+        renderFlashFrame(label, background: background, visible: true)
         let timer = Timer(timeInterval: flashDuration, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
@@ -66,23 +69,28 @@ class OnAirIndicator {
                 return
             }
 
-            let alpha: CGFloat = (self.flashCount % 2 == 0) ? 0.0 : 1.0
-            self.statusItem?.button?.attributedTitle = Self.labelAttributedString(label, background: background, alpha: alpha)
-            self.statusItem?.button?.image = nil
-            self.statusItem?.button?.contentTintColor = nil
-
             self.flashCount += 1
             if self.flashCount >= self.labelFlashCycles * 2 {
                 timer.invalidate()
                 self.isFlashing = false
                 self.flashCount = 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                    self?.applyBaseState()
-                }
+                self.applyBaseState()
+                return
             }
+
+            let visible = (self.flashCount % 2 == 0)
+            self.renderFlashFrame(label, background: background, visible: visible)
         }
         RunLoop.main.add(timer, forMode: .common)
         flashTimer = timer
+    }
+
+    private func renderFlashFrame(_ label: String, background: NSColor, visible: Bool) {
+        statusItem?.button?.attributedTitle = Self.labelAttributedString(
+            label, background: background, alpha: visible ? 1.0 : 0.0
+        )
+        statusItem?.button?.image = nil
+        statusItem?.button?.contentTintColor = nil
     }
 
     /// Subtle 1–2 red-tint pulses on the mic icon. Used for volume corrections.
