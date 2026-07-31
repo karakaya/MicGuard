@@ -82,6 +82,8 @@ Layered components with dependency injection and Combine-based reactive communic
 
 Full process: [RELEASING.md](RELEASING.md). Releases are cut entirely locally — no CI, no secrets in workflows (same model as local-cloud-browser). Run `scripts/release.sh <version>`: test → version bump → universal build → Developer ID sign → notarize + staple (app and DMG, via the `notarytool` keychain profile) → commit + tag `v<version>` + push → GitHub release with DMG → Homebrew cask bump in [milan0x/homebrew-tap](https://github.com/milan0x/homebrew-tap).
 
+**When the user asks to ship / release / publish a new version:** run `scripts/release.sh <version>` (pick the next version yourself if the user didn't name one — bump MINOR for features, PATCH for fixes). Do not hand-roll the steps. Notarization waits are built into the script (`notarytool submit --wait`) — let it block until Apple returns `Accepted`; do not create the GitHub release before both the app and the DMG are notarized and stapled. If the script fails partway, fix the cause and finish the remaining steps manually in script order, keeping every name in the table below exact.
+
 Naming is load-bearing — the cask and the tap's bump workflow parse these exact formats:
 
 - Version `MAJOR.MINOR[.PATCH]`; git tag `v<version>`; `CFBundleShortVersionString` must equal the tag without `v`; `CFBundleVersion` is an integer incremented every release.
