@@ -24,6 +24,7 @@
 		60BB5B71AE333E741C4B7E63 /* PopoverViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A5E834163AD279EB488F764 /* PopoverViewModel.swift */; };
 		61EF87980C7292C453E3A064 /* OnAirIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D718142792A4F0FFF7A5482 /* OnAirIndicator.swift */; };
 		65044E594F00C21CBEC1716D /* VolumeGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23563E142FC69EE67428040D /* VolumeGuardTests.swift */; };
+		68442FB1817780371E9C4C3F /* WatchdogYieldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A19C59F076E4C11C60C953 /* WatchdogYieldTests.swift */; };
 		691F0F8CF3CF250C20D1D8BA /* ActivityMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECB2729A791348CF3CD2A9F0 /* ActivityMonitorTests.swift */; };
 		7C7AA92E2629894DE14D2784 /* StatsManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84A882C8366DD60D8C247ED /* StatsManagerTests.swift */; };
 		7DD1F836F15E4352B2D50596 /* DevicePriorityListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2A1B6263BD6B2B8700D52D4 /* DevicePriorityListView.swift */; };
@@ -65,6 +66,7 @@
 		5402F144B596FE9D04B12231 /* DeviceWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWatchdog.swift; sourceTree = "<group>"; };
 		58A53A63F92F43E8D9A9A49D /* PopoverContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverContentView.swift; sourceTree = "<group>"; };
 		5F9EF3670D38515CF80725F1 /* VolumeGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumeGuard.swift; sourceTree = "<group>"; };
+		63A19C59F076E4C11C60C953 /* WatchdogYieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchdogYieldTests.swift; sourceTree = "<group>"; };
 		65D046220518AE607C60266E /* AudioDeviceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceTests.swift; sourceTree = "<group>"; };
 		6A5E834163AD279EB488F764 /* PopoverViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverViewModel.swift; sourceTree = "<group>"; };
 		6D718142792A4F0FFF7A5482 /* OnAirIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnAirIndicator.swift; sourceTree = "<group>"; };
@@ -198,6 +200,7 @@
 				DB6609B20D47378A5C9AB137 /* ProcessMonitorTests.swift */,
 				C84A882C8366DD60D8C247ED /* StatsManagerTests.swift */,
 				23563E142FC69EE67428040D /* VolumeGuardTests.swift */,
+				63A19C59F076E4C11C60C953 /* WatchdogYieldTests.swift */,
 			);
 			path = MicGuardTests;
 			sourceTree = "<group>";
@@ -336,6 +339,7 @@
 				82C66B9309DF87F1F906B6EE /* ProcessMonitorTests.swift in Sources */,
 				7C7AA92E2629894DE14D2784 /* StatsManagerTests.swift in Sources */,
 				65044E594F00C21CBEC1716D /* VolumeGuardTests.swift in Sources */,
+				68442FB1817780371E9C4C3F /* WatchdogYieldTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -493,7 +497,7 @@
 				CODE_SIGN_ENTITLEMENTS = MicGuard/App/MicGuard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -506,7 +510,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LS_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.micguard.app;
 				PRODUCT_NAME = MicGuard;
 				SDKROOT = macosx;
@@ -520,7 +524,7 @@
 				CODE_SIGN_ENTITLEMENTS = MicGuard/App/MicGuard.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -533,7 +537,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LS_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.micguard.app;
 				PRODUCT_NAME = MicGuard;
 				SDKROOT = macosx;
