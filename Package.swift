@@ -56,7 +56,8 @@ let package = Package(
                 "StatsManagerTests.swift",
                 "ProcessMonitorTests.swift",
                 "OutputDeviceWatchdogTests.swift",
-                "OnAirIndicatorTests.swift"
+                "OnAirIndicatorTests.swift",
+                "WatchdogYieldTests.swift"
             ]
         )
     ]

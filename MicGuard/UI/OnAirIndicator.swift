@@ -19,6 +19,7 @@ class OnAirIndicator {
 
     private var isInUse: Bool = false
     private var style: MicInUseIndicatorStyle = .orangePill
+    private var isAppPaused: Bool = false
 
     private var isFlashing: Bool = false
     private var flashTimer: Timer?
@@ -44,6 +45,14 @@ class OnAirIndicator {
     func update(isInUse: Bool, force: Bool = false) {
         if !force && isInUse == self.isInUse { return }
         self.isInUse = isInUse
+        if !isFlashing { applyBaseState() }
+    }
+
+    /// Master pause: slashed, dimmed mic so the disabled state is visible at a
+    /// glance. Overrides the in-use pill — a paused MicGuard shows paused.
+    func setAppPaused(_ paused: Bool) {
+        guard paused != isAppPaused else { return }
+        isAppPaused = paused
         if !isFlashing { applyBaseState() }
     }
 
@@ -135,6 +144,16 @@ class OnAirIndicator {
     private func applyBaseState() {
         guard let button = statusItem?.button else { return }
         button.attributedTitle = NSAttributedString()
+
+        if isAppPaused {
+            let mic = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "MicGuard (paused)")
+            mic?.isTemplate = true
+            button.image = mic
+            button.contentTintColor = nil
+            button.appearsDisabled = true
+            return
+        }
+        button.appearsDisabled = false
 
         if isInUse {
             switch style {

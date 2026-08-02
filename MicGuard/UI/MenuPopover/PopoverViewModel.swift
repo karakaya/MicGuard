@@ -32,6 +32,20 @@ struct AddableOutputDevice: Identifiable, Hashable {
     let displayName: String
 }
 
+/// A pending "stop fighting?" offer from a watchdog that keeps blocking
+/// repeated switches to the same non-preferred device.
+struct FightOffer: Equatable {
+    let attemptedName: String   // the device something keeps switching to
+    let preferredName: String   // the device MicGuard is holding
+    let createdAt: Date
+
+    /// Offers go stale — accepting one hours later would yield and switch to a
+    /// contest "winner" that may be long gone.
+    var isStale: Bool {
+        Date().timeIntervalSince(createdAt) > 300
+    }
+}
+
 @MainActor
 final class PopoverViewModel: ObservableObject {
 
@@ -63,14 +77,19 @@ final class PopoverViewModel: ObservableObject {
     @Published var customOutputVolumes: [CustomOutputVolumeEntry] = []
 
     @Published var launchAtLogin: Bool = false
-    @Published var showNotifications: Bool = false
-    @Published var showStats: Bool = false
     @Published var micInUseIndicatorStyle: MicInUseIndicatorStyle = .orangePill
-    @Published var autoYieldOnRepeatedOverride: Bool = true
     @Published var autoResumeOnTopPriorityPick: Bool = false
     @Published var hideVirtualDevices: Bool = false
+    @Published var appPaused: Bool = false
 
     @Published var stats: [StatType: Int] = [:]
+
+    // Watchdog yield state, mirrored from AppDelegate via notifications so the
+    // popover tells the truth about whether enforcement is actually running.
+    @Published var isInputYielded: Bool = false
+    @Published var isOutputYielded: Bool = false
+    @Published var inputFightOffer: FightOffer? = nil
+    @Published var outputFightOffer: FightOffer? = nil
 
     // MARK: - Private
 
@@ -146,6 +165,38 @@ final class PopoverViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .watchdogYieldStateChanged)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self,
+                      let direction = notification.userInfo?["direction"] as? String,
+                      let yielded = notification.userInfo?["yielded"] as? Bool else { return }
+                if direction == "input" {
+                    self.isInputYielded = yielded
+                    if yielded { self.inputFightOffer = nil }
+                } else {
+                    self.isOutputYielded = yielded
+                    if yielded { self.outputFightOffer = nil }
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .watchdogFightDetected)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self,
+                      let direction = notification.userInfo?["direction"] as? String,
+                      let attempted = notification.userInfo?["attempted"] as? String,
+                      let preferred = notification.userInfo?["preferred"] as? String else { return }
+                let offer = FightOffer(attemptedName: attempted, preferredName: preferred, createdAt: Date())
+                if direction == "input" {
+                    self.inputFightOffer = offer
+                } else {
+                    self.outputFightOffer = offer
+                }
+            }
+            .store(in: &cancellables)
+
         preferencesManager.preferencesChangedPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] key in
@@ -162,12 +213,10 @@ final class PopoverViewModel: ObservableObject {
         outputAutoSwitchEnabled = preferencesManager.outputAutoSwitchEnabled
         volumeStrategy = preferencesManager.volumeControlStrategy
         launchAtLogin = preferencesManager.launchAtLogin
-        showNotifications = preferencesManager.showNotifications
-        showStats = preferencesManager.showStats
         micInUseIndicatorStyle = preferencesManager.micInUseIndicatorStyle
-        autoYieldOnRepeatedOverride = preferencesManager.autoYieldOnRepeatedOverride
         autoResumeOnTopPriorityPick = preferencesManager.autoResumeOnTopPriorityPick
         hideVirtualDevices = preferencesManager.hideVirtualDevices
+        appPaused = preferencesManager.appPaused
 
         if !suppressVolumePublish {
             targetVolume = preferencesManager.targetVolume
@@ -178,6 +227,9 @@ final class PopoverViewModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        // Called on popover open — drop offers from fights that ended long ago.
+        if inputFightOffer?.isStale == true { inputFightOffer = nil }
+        if outputFightOffer?.isStale == true { outputFightOffer = nil }
         inputDeviceLockEnabled = preferencesManager.inputDeviceLockEnabled
         inputAutoSwitchEnabled = preferencesManager.inputAutoSwitchEnabled
         outputDeviceLockEnabled = preferencesManager.outputDeviceLockEnabled
@@ -185,12 +237,10 @@ final class PopoverViewModel: ObservableObject {
         volumeStrategy = preferencesManager.volumeControlStrategy
         targetVolume = preferencesManager.targetVolume
         launchAtLogin = preferencesManager.launchAtLogin
-        showNotifications = preferencesManager.showNotifications
-        showStats = preferencesManager.showStats
         micInUseIndicatorStyle = preferencesManager.micInUseIndicatorStyle
-        autoYieldOnRepeatedOverride = preferencesManager.autoYieldOnRepeatedOverride
         autoResumeOnTopPriorityPick = preferencesManager.autoResumeOnTopPriorityPick
         hideVirtualDevices = preferencesManager.hideVirtualDevices
+        appPaused = preferencesManager.appPaused
         refreshDeviceLists()
         refreshStatusLine()
         refreshStats()
@@ -283,10 +333,15 @@ final class PopoverViewModel: ObservableObject {
         }
 
         var ordered: [Resolved] = []
+        // Live devices already resolved to some order entry. Rescue candidates are
+        // limited to unclaimed devices so two stale entries with the same cached
+        // name can't both collapse onto one live device (duplicate row IDs, and
+        // the order setter's dedup would then silently delete an entry).
+        var claimedUIDs = Set<String>()
         for uid in priorityOrder {
             var device = allDevices.first { $0.uid == uid }
             if device == nil, let cachedName = preferencesManager.cachedDeviceName(for: uid) {
-                let nameMatches = allDevices.filter { $0.name == cachedName }
+                let nameMatches = allDevices.filter { $0.name == cachedName && !claimedUIDs.contains($0.uid) }
                 if nameMatches.count == 1 {
                     device = nameMatches[0]
                     replaceUID(uid, nameMatches[0].uid)
@@ -295,19 +350,42 @@ final class PopoverViewModel: ObservableObject {
                     unsettableUIDs.remove(uid)
                 }
             }
+            if let claimed = device {
+                claimedUIDs.insert(claimed.uid)
+            }
             ordered.append(Resolved(device: device, uid: device?.uid ?? uid))
         }
 
+        // Connected devices no order entry resolved to. "Accounted for" means an
+        // entry actually claimed the device — a mere cached-name collision with a
+        // stale entry must not suppress a physically connected device from the list.
         let snapshot = currentOrder()
-        for device in allDevices {
-            let knownByUID = snapshot.contains(device.uid)
-            let knownByName = snapshot.contains { uid in
-                preferencesManager.cachedDeviceName(for: uid) == device.name
-            }
-            if !knownByUID && !knownByName {
-                addToOrder(device.uid)
-                ordered.append(Resolved(device: device, uid: device.uid))
-            }
+        var newDevices = allDevices.filter { device in
+            !snapshot.contains(device.uid) && !claimedUIDs.contains(device.uid)
+        }
+
+        // A stored UID with no cached name (seeded by the legacy single-UID
+        // migration) can never be name-rescued. When exactly one such slot and
+        // exactly one unaccounted device exist, adopt in place — otherwise the
+        // user's #1 turns into a permanent ghost and their device re-appears at
+        // the END of the list as a "new" entry.
+        let unnamedStaleSlots = ordered.enumerated().filter { _, entry in
+            entry.device == nil && preferencesManager.cachedDeviceName(for: entry.uid) == nil
+        }
+        if newDevices.count == 1, unnamedStaleSlots.count == 1,
+           let slot = unnamedStaleSlots.first,
+           !newDevices[0].isLikelyUnsettable {  // never let a virtual device steal the user's slot
+            let device = newDevices[0]
+            replaceUID(slot.element.uid, device.uid)
+            unsettableUIDs.remove(slot.element.uid)
+            ordered[slot.offset] = Resolved(device: device, uid: device.uid)
+            claimedUIDs.insert(device.uid)
+            newDevices = []
+        }
+
+        for device in newDevices {
+            addToOrder(device.uid)
+            ordered.append(Resolved(device: device, uid: device.uid))
         }
 
         for entry in ordered {
@@ -346,11 +424,52 @@ final class PopoverViewModel: ObservableObject {
         return allEntries
     }
 
+    // MARK: - Actions: Yield / fight offers
+
+    /// User accepted "stop fighting" — yield and switch to the contested device.
+    func acceptInputFightOffer() {
+        let attempted = inputFightOffer?.attemptedName
+        inputFightOffer = nil
+        NotificationCenter.default.post(
+            name: .userRequestedYieldInputProtection, object: nil,
+            userInfo: attempted.map { ["deviceName": $0] }
+        )
+    }
+
+    func dismissInputFightOffer() {
+        inputFightOffer = nil
+    }
+
+    func resumeInputProtection() {
+        NotificationCenter.default.post(name: .userRequestedResumeInputProtection, object: nil)
+    }
+
+    func acceptOutputFightOffer() {
+        let attempted = outputFightOffer?.attemptedName
+        outputFightOffer = nil
+        NotificationCenter.default.post(
+            name: .userRequestedYieldOutputProtection, object: nil,
+            userInfo: attempted.map { ["deviceName": $0] }
+        )
+    }
+
+    func dismissOutputFightOffer() {
+        outputFightOffer = nil
+    }
+
+    func resumeOutputProtection() {
+        NotificationCenter.default.post(name: .userRequestedResumeOutputProtection, object: nil)
+    }
+
     // MARK: - Actions: Input
 
     func setInputDeviceLockEnabled(_ enabled: Bool) {
         preferencesManager.inputDeviceLockEnabled = enabled
         inputDeviceLockEnabled = enabled
+        // Toggling the lock stops/starts the watchdog with fresh (non-yielded)
+        // state — reset the mirrors so the popover doesn't show a stale "Paused".
+        isInputYielded = false
+        inputFightOffer = nil
         NotificationCenter.default.post(name: .inputDeviceLockChanged, object: nil)
     }
 
@@ -417,8 +536,12 @@ final class PopoverViewModel: ObservableObject {
             preferencesManager.moveDevice(uid: uid, direction: .toTop)
         }
         // The .preferredInputDeviceChanged subscription refreshes device lists
-        // and the status line — no explicit refresh needed here.
+        // and the status line — no explicit refresh needed here. Posted before the
+        // resume so the watchdog enforces against the NEW order, not the old one.
         NotificationCenter.default.post(name: .preferredInputDeviceChanged, object: uid)
+        // A deliberate device pick re-arms a yielded lock — the user has chosen
+        // their new #1 and expects it to be held. (No-op when not yielded.)
+        NotificationCenter.default.post(name: .userRequestedResumeInputProtection, object: nil)
     }
 
     /// Snap the system default input to the top connected device in priority order.
@@ -465,6 +588,9 @@ final class PopoverViewModel: ObservableObject {
     func setOutputDeviceLockEnabled(_ enabled: Bool) {
         preferencesManager.outputDeviceLockEnabled = enabled
         outputDeviceLockEnabled = enabled
+        // Same stale-mirror reset as the input lock toggle.
+        isOutputYielded = false
+        outputFightOffer = nil
         NotificationCenter.default.post(name: .outputDeviceLockChanged, object: nil)
     }
 
@@ -520,9 +646,10 @@ final class PopoverViewModel: ObservableObject {
         if order.first != uid {
             preferencesManager.moveOutputDevice(uid: uid, direction: .toTop)
         }
-        // The defaultOutputChanged + .preferredOutputDeviceChanged subscriptions
-        // refresh device lists and the status line — no explicit refresh needed here.
+        // Order update first so a resume enforces against the NEW order.
         NotificationCenter.default.post(name: .preferredOutputDeviceChanged, object: uid)
+        // A deliberate device pick re-arms a yielded lock. (No-op when not yielded.)
+        NotificationCenter.default.post(name: .userRequestedResumeOutputProtection, object: nil)
     }
 
     /// Snap the system default output to the top connected device in priority order.
@@ -642,19 +769,22 @@ final class PopoverViewModel: ObservableObject {
         launchAtLogin = enabled
     }
 
-    func setShowNotifications(_ enabled: Bool) {
-        preferencesManager.showNotifications = enabled
-        showNotifications = enabled
+    /// Master kill switch. Pausing clears yield mirrors and pending fight offers —
+    /// the watchdogs are stopped outright, so that state is meaningless.
+    func setAppPaused(_ paused: Bool) {
+        preferencesManager.appPaused = paused
+        appPaused = paused
+        if paused {
+            isInputYielded = false
+            isOutputYielded = false
+            inputFightOffer = nil
+            outputFightOffer = nil
+        }
     }
 
     func setMicInUseIndicatorStyle(_ style: MicInUseIndicatorStyle) {
         preferencesManager.micInUseIndicatorStyle = style
         micInUseIndicatorStyle = style
-    }
-
-    func setAutoYieldOnRepeatedOverride(_ enabled: Bool) {
-        preferencesManager.autoYieldOnRepeatedOverride = enabled
-        autoYieldOnRepeatedOverride = enabled
     }
 
     func setAutoResumeOnTopPriorityPick(_ enabled: Bool) {
@@ -666,11 +796,6 @@ final class PopoverViewModel: ObservableObject {
         preferencesManager.hideVirtualDevices = enabled
         hideVirtualDevices = enabled
         refreshDeviceLists()
-    }
-
-    func setShowStats(_ enabled: Bool) {
-        preferencesManager.showStats = enabled
-        showStats = enabled
     }
 
     func resetStats() {

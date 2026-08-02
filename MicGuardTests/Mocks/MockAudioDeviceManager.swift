@@ -49,6 +49,10 @@ class MockAudioDeviceManager: AudioDeviceManaging {
     
     var shouldFailSetDevice = false
     var shouldFailSetVolume = false
+
+    // UIDs for which setDefault* reports success but the default silently stays
+    // put — mirrors macOS's behavior for virtual/aggregate devices.
+    var silentlyRefusedUIDs: Set<String> = []
     
     // MARK: - Setup Helpers
     
@@ -114,9 +118,10 @@ class MockAudioDeviceManager: AudioDeviceManaging {
     
     func setDefaultInputDevice(_ device: AudioDevice) -> Bool {
         setDefaultInputDeviceCalls.append(device)
-        
+
         guard !shouldFailSetDevice else { return false }
-        
+        guard !silentlyRefusedUIDs.contains(device.uid) else { return true }
+
         _defaultInputDevice = device
         defaultInputChangedPublisher.send(device)
         return true
@@ -124,9 +129,10 @@ class MockAudioDeviceManager: AudioDeviceManaging {
     
     func setDefaultOutputDevice(_ device: AudioDevice) -> Bool {
         setDefaultOutputDeviceCalls.append(device)
-        
+
         guard !shouldFailSetDevice else { return false }
-        
+        guard !silentlyRefusedUIDs.contains(device.uid) else { return true }
+
         _defaultOutputDevice = device
         defaultOutputChangedPublisher.send(device)
         return true

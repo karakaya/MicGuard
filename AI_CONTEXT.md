@@ -31,11 +31,15 @@ Layered components with dependency injection and Combine-based reactive communic
 
 **Device hijack prevention:** User sets device priority → watchdog subscribes to `defaultInputChangedPublisher` / `defaultOutputChangedPublisher` → CoreAudio fires on device change → watchdog checks against priority list → calls `setDefaultInputDevice()` / `setDefaultOutputDevice()` → fires `onDeviceHijackBlocked` → stats increment + `INPUT HELD` / `OUTPUT HELD` flash on the status item.
 
-**Smart protection:**
-- *Auto-yield* (`autoYieldOnRepeatedOverride`, default on): after the user repeatedly overrides the watchdog within a short window, the watchdog yields and fires `onYielded` + an `INPUT/OUTPUT CHANGED` green flash. Yielded state is cleared via the `userRequestedResumeInputProtection` / `userRequestedResumeOutputProtection` notifications (posted by the popover's "Reactivate" button and the right-click menu).
-- *Auto-resume* (`autoResumeOnTopPriorityPick`, default off): if the user manually picks the top-priority device while yielded, watchdog resumes protection automatically and fires `onProtectionResumed`.
+**Master pause** (`appPaused` preference, persisted): one-tap kill switch at the top of the popover. Stops both watchdogs and the volume guard, suppresses auto-switch and per-device output volume, and shows a slashed/dimmed menu-bar mic (`OnAirIndicator.setAppPaused`). Every enforcement start-path in `AppDelegate` guards on it; ActivityMonitor keeps running (the On Air indicator is passive observation). Resume re-runs `applyStoredPreferences()`.
 
-**Volume lock:** `VolumeGuard` attaches a CoreAudio listener to the device volume property → detects drift beyond tolerance (`0.01`) → debounces (default 2.5s) → corrects volume → anti-fight throttle (max 10 corrections per 5s window).
+**Smart protection (consent-based yield):**
+- *Fight detection* (always on; the old toggle was removed): CoreAudio can't attribute a default-device change to a user vs. an app, so the watchdog NEVER yields silently — a silent yield would surrender to the exact hijackers (Zoom/Teams retry loops) the app exists to block. After repeated overrides hit the threshold, it fires `onFightDetected` and keeps enforcing; the popover shows a `FightOfferBanner` ("Keep holding" / "Use X"). Only an explicit user choice calls `yieldNow()`.
+- *Yield state* is first-class: `watchdogYieldStateChanged` notifications keep `PopoverViewModel.isInputYielded/isOutputYielded` truthful (status line shows "Paused" + Resume button, never a false "Enforcing"). Yield survives priority-list edits (AppDelegate updates a running watchdog in place instead of stop/start). `handleInputAutoSwitch`/`handleOutputAutoSwitch` skip while yielded. Cleared via the `userRequestedResumeInputProtection` / `userRequestedResumeOutputProtection` notifications (popover Resume/Re-apply buttons, right-click menu, or clicking a device row — a deliberate pick re-arms the lock).
+- *Auto-resume* (`autoResumeOnTopPriorityPick`, default off): resumes only when the new default is strictly priority #1 (resolved through name matching), never on the best-available or fallback device, and never inside the device-list flux window.
+- *Unsettable fallthrough*: when `setDefaultDevice` reports success but the default doesn't move (macOS silently refuses Teams Audio / BlackHole / aggregates), the watchdog counts the failure and after 2 skips that device for the session, falling through to the next priority entry instead of retrying forever. Counts reset on device-list changes.
+
+**Volume lock:** `VolumeGuard` attaches a CoreAudio listener to the device volume property → detects drift beyond tolerance (`0.01`) → debounces (default 2.5s, with a hard deadline: continuous churn such as conferencing auto-gain cannot postpone the correction past first-drift + interval) → corrects volume → anti-fight throttle (max 10 corrections per 5s window). On a default-device switch it re-applies the target after a 0.5s settle, so a device left at the wrong gain doesn't sit there until something else trips the listener.
 
 **Smart reset:** `ActivityMonitor` checks `isDeviceRunning` (device-level, not per-app) → when mic stops → `onMeetingEnded` fires → if strategy is `resetWhenMicStops` and current volume < target → resets volume.
 
@@ -63,11 +67,11 @@ Layered components with dependency injection and Combine-based reactive communic
 
 **ProcessMonitor uses hardcoded bundle IDs:** New audio apps won't be detected until bundle IDs are added. Falls back to `.nonRTC` for unknown apps.
 
-**Name-based device matching is ambiguous:** When a device reconnects with a new UID, matching falls back to its display name. Two devices with the same name produce an arbitrary match (`onDeviceMatchAmbiguous` callback is fired but not surfaced).
+**Name-based device matching is ambiguous:** When a device reconnects with a new UID, matching falls back to its display name. With two devices sharing a name, the watchdog refuses to guess (`onDeviceMatchAmbiguous` fires but isn't surfaced in the UI) and that priority entry stays unresolved. The popover list still shows connected devices in this case (they're appended as new entries), but the stale entry remains a ghost until the user re-picks the device.
 
-**`unsettableUIDs` is per-session only:** Devices macOS silently refuses to set as default (BlackHole, Teams Audio, aggregates) are tracked in `PopoverViewModel` to dim them in the UI, but the set isn't persisted across launches.
+**Unsettable-device tracking is per-session only:** Devices macOS silently refuses to set as default (BlackHole, Teams Audio, aggregates) are tracked in two session-scoped sets — `PopoverViewModel.unsettableUIDs` (dims them in the UI) and the watchdogs' stick-failure counts (skips them during enforcement). Neither persists across launches.
 
-**No anti-fight test coverage:** `VolumeGuard` throttle mechanism works but has no unit tests.
+**No anti-fight throttle test coverage:** `VolumeGuard`'s 10-corrections-per-5s throttle works but has no unit tests (debounce deadline and device-switch enforcement are covered).
 
 ## Conventions
 

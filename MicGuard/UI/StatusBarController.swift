@@ -146,6 +146,16 @@ class StatusBarController {
                 self.onAirIndicator?.setStyle(self.preferencesManager.micInUseIndicatorStyle)
             }
             .store(in: &cancellables)
+
+        // Master pause: slashed/dimmed menu-bar icon while protections are off.
+        preferencesManager.preferencesChangedPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] key in
+                guard key == "AppPaused", let self = self else { return }
+                self.onAirIndicator?.setAppPaused(self.preferencesManager.appPaused)
+            }
+            .store(in: &cancellables)
+        onAirIndicator?.setAppPaused(preferencesManager.appPaused)
     }
 
     private func setupPopover() {
@@ -221,4 +231,10 @@ extension Notification.Name {
     static let preferredOutputDeviceChanged = Notification.Name("preferredOutputDeviceChanged")
     static let userRequestedResumeInputProtection = Notification.Name("userRequestedResumeInputProtection")
     static let userRequestedResumeOutputProtection = Notification.Name("userRequestedResumeOutputProtection")
+    static let userRequestedYieldInputProtection = Notification.Name("userRequestedYieldInputProtection")
+    static let userRequestedYieldOutputProtection = Notification.Name("userRequestedYieldOutputProtection")
+    /// userInfo: ["direction": "input"|"output", "yielded": Bool]
+    static let watchdogYieldStateChanged = Notification.Name("watchdogYieldStateChanged")
+    /// userInfo: ["direction": "input"|"output", "attempted": String, "preferred": String]
+    static let watchdogFightDetected = Notification.Name("watchdogFightDetected")
 }

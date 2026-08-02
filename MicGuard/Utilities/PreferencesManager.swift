@@ -56,6 +56,8 @@ protocol PreferencesManaging: AnyObject {
     var launchAtLogin: Bool { get set }
     var showInMenuBar: Bool { get set }
     var showNotifications: Bool { get set }
+    /// Master kill switch: while true, every enforcement feature is off.
+    var appPaused: Bool { get set }
     var showStats: Bool { get set }
     var micInUseIndicatorStyle: MicInUseIndicatorStyle { get set }
     var autoYieldOnRepeatedOverride: Bool { get set }
@@ -118,6 +120,7 @@ private enum PreferenceKey: String {
     case launchAtLogin = "LaunchAtLogin"
     case showInMenuBar = "ShowInMenuBar"
     case showNotifications = "ShowNotifications"
+    case appPaused = "AppPaused"
     case showStats = "ShowStats"
     case micInUseIndicatorStyle = "MicInUseIndicatorStyle"
     case autoYieldOnRepeatedOverride = "AutoYieldOnRepeatedOverride"
@@ -142,8 +145,11 @@ class PreferencesManager: PreferencesManaging {
     
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        registerDefaults()
+        // Migration MUST run before registerDefaults(): string(forKey:) consults the
+        // registration domain, so registering first makes the "new key not set yet"
+        // guard in the migration permanently false and the migration dead code.
         migrateOldPreferences()
+        registerDefaults()
     }
     
     private func registerDefaults() {
@@ -157,11 +163,17 @@ class PreferencesManager: PreferencesManaging {
             PreferenceKey.launchAtLogin.rawValue: false,
             PreferenceKey.showInMenuBar.rawValue: true,
             PreferenceKey.showNotifications.rawValue: true,
+            PreferenceKey.appPaused.rawValue: false,
             PreferenceKey.showStats.rawValue: false,
             PreferenceKey.micInUseIndicatorStyle.rawValue: MicInUseIndicatorStyle.redTint.rawValue,
             PreferenceKey.autoYieldOnRepeatedOverride.rawValue: true,
-            PreferenceKey.autoResumeOnTopPriorityPick.rawValue: false,
-            PreferenceKey.hideVirtualDevices.rawValue: false
+            // Auto-resume defaults on: after a deliberate yield, picking your #1
+            // device again is an unambiguous "resume" signal — fewer stuck-paused
+            // states for users who never find the Resume button.
+            PreferenceKey.autoResumeOnTopPriorityPick.rawValue: true,
+            // Virtual/loopback devices (Teams Audio, BlackHole) hidden by default —
+            // they confuse first-run users and macOS refuses them as defaults anyway.
+            PreferenceKey.hideVirtualDevices.rawValue: true
         ])
     }
     
@@ -289,6 +301,14 @@ class PreferencesManager: PreferencesManaging {
         }
     }
     
+    var appPaused: Bool {
+        get { defaults.bool(forKey: PreferenceKey.appPaused.rawValue) }
+        set {
+            defaults.set(newValue, forKey: PreferenceKey.appPaused.rawValue)
+            preferencesChangedPublisher.send(PreferenceKey.appPaused.rawValue)
+        }
+    }
+
     var showNotifications: Bool {
         get { defaults.bool(forKey: PreferenceKey.showNotifications.rawValue) }
         set {
@@ -366,29 +386,52 @@ class PreferencesManager: PreferencesManaging {
         let oldLockedVolumeKey = "LockedInputVolume"
         let oldResetVolumeKey = "DefaultResetVolume"
         
-        // Only migrate if new strategy is not set
-        if defaults.string(forKey: PreferenceKey.volumeControlStrategy.rawValue) == nil {
-            let oldLockEnabled = defaults.bool(forKey: oldLockEnabledKey)
-            let oldAutoResetEnabled = defaults.bool(forKey: oldAutoResetKey)
-            
-            // Determine new strategy based on old settings
-            if oldLockEnabled {
-                volumeControlStrategy = .lockVolume
-                // Migrate target volume from old locked volume
-                if let oldVolume = defaults.object(forKey: oldLockedVolumeKey) as? Float {
-                    targetVolume = oldVolume
-                }
-            } else if oldAutoResetEnabled {
-                volumeControlStrategy = .resetWhenMicStops
-                // Migrate target volume from old reset volume
-                if let oldVolume = defaults.object(forKey: oldResetVolumeKey) as? Float {
-                    targetVolume = oldVolume
-                }
-            } else {
-                volumeControlStrategy = .none
+        // Gate on legacy-key presence (a fresh install has none and keeps the
+        // registered default strategy) AND on the new strategy key having no
+        // PERSISTED value — a user who already configured the new strategy while
+        // this migration was dead code must not have it overwritten. A plain
+        // string(forKey:) nil-check can't detect that: the registration domain is
+        // process-wide, so any earlier PreferencesManager instance makes it
+        // non-nil. Probe instead: removeObject strips only the persisted value,
+        // leaving the registered default (if any) visible.
+        let hasLegacyVolumeKeys = defaults.object(forKey: oldLockEnabledKey) != nil
+            || defaults.object(forKey: oldAutoResetKey) != nil
+            || defaults.object(forKey: oldLockedVolumeKey) != nil
+            || defaults.object(forKey: oldResetVolumeKey) != nil
+
+        if hasLegacyVolumeKeys {
+            let strategyKey = PreferenceKey.volumeControlStrategy.rawValue
+            let currentStrategy = defaults.string(forKey: strategyKey)
+            defaults.removeObject(forKey: strategyKey)
+            let registeredOnly = defaults.string(forKey: strategyKey)
+            if let currentStrategy = currentStrategy {
+                defaults.set(currentStrategy, forKey: strategyKey)
             }
-            
-            // Clean up old keys
+            let hasPersistedStrategy = currentStrategy != nil && currentStrategy != registeredOnly
+
+            if !hasPersistedStrategy {
+                let oldLockEnabled = defaults.bool(forKey: oldLockEnabledKey)
+                let oldAutoResetEnabled = defaults.bool(forKey: oldAutoResetKey)
+
+                // Determine new strategy based on old settings
+                if oldLockEnabled {
+                    volumeControlStrategy = .lockVolume
+                    // Migrate target volume from old locked volume
+                    if let oldVolume = defaults.object(forKey: oldLockedVolumeKey) as? Float {
+                        targetVolume = oldVolume
+                    }
+                } else if oldAutoResetEnabled {
+                    volumeControlStrategy = .resetWhenMicStops
+                    // Migrate target volume from old reset volume
+                    if let oldVolume = defaults.object(forKey: oldResetVolumeKey) as? Float {
+                        targetVolume = oldVolume
+                    }
+                } else {
+                    volumeControlStrategy = .none
+                }
+            }
+
+            // Clean up old keys either way — the migration is one-shot.
             defaults.removeObject(forKey: oldLockEnabledKey)
             defaults.removeObject(forKey: oldAutoResetKey)
             defaults.removeObject(forKey: oldLockedVolumeKey)

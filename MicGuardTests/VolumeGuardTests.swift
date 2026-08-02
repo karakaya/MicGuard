@@ -282,4 +282,60 @@ final class VolumeGuardTests: XCTestCase {
         volumeGuard.onThrottleStateChanged?(true)
         XCTAssertTrue(callbackCalled, "onThrottleStateChanged callback should be callable")
     }
+
+    // MARK: - Device switch enforcement
+
+    func testAppliesTargetVolumeAfterDeviceSwitch() {
+        // A newly-default device carries whatever volume it last had; the guard
+        // must snap it to target after the settle delay, without waiting for a
+        // volume event that may never come.
+        let airpods = mockAudioManager.inputDevices.first { $0.uid == "AirPodsPro" }!
+        volumeGuard.startGuarding(targetVolume: 0.75)
+        mockAudioManager.simulateVolumeChange(for: airpods, to: 0.2)
+        mockAudioManager.setInputVolumeCalls.removeAll()
+
+        mockAudioManager.simulateDeviceSwitch(to: airpods)
+
+        let expectation = XCTestExpectation(description: "target applied after settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertTrue(
+            mockAudioManager.setInputVolumeCalls.contains { $0.device.uid == airpods.uid && abs($0.volume - 0.75) < 0.001 },
+            "Target volume must be applied to the newly-default device"
+        )
+        XCTAssertEqual(mockAudioManager.getInputVolume(for: airpods) ?? 0, 0.75, accuracy: 0.001)
+    }
+
+    // MARK: - Debounce deadline
+
+    func testContinuousVolumeChurnCannotStarveCorrection() {
+        // Pure trailing-edge debounce let any source changing volume faster than
+        // the interval postpone the correction forever (conferencing auto-gain).
+        // The deadline pins the correction to debounceInterval after FIRST drift.
+        let mock = mockAudioManager!
+        let guard2 = VolumeGuard(audioDeviceManager: mock, debounceInterval: 0.5)
+        defer { guard2.stopGuarding() }
+        let device = mock.defaultInputDevice!
+        guard2.startGuarding(targetVolume: 0.75)
+        mock.setInputVolumeCalls.removeAll()
+
+        // Churn: re-drift and re-trigger every 0.15s for ~0.6s — each event
+        // used to cancel and re-schedule the correction another 0.5s out.
+        for i in 0..<5 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.15) { [weak guard2] in
+                mock.simulateVolumeChange(for: device, to: 0.2)
+                guard2?.handleVolumeChange()
+            }
+        }
+
+        let expectation = XCTestExpectation(description: "correction fires despite churn")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertTrue(
+            mock.setInputVolumeCalls.contains { abs($0.volume - 0.75) < 0.001 },
+            "Correction must fire by first-drift + debounceInterval even under continuous churn"
+        )
+    }
 }

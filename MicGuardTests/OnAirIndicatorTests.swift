@@ -18,6 +18,7 @@ class MockPreferencesForOnAir: PreferencesManaging {
     var launchAtLogin: Bool = false
     var showInMenuBar: Bool = true
     var showNotifications: Bool = true
+    var appPaused: Bool = false
     var showStats: Bool = false
     var micInUseIndicatorStyle: MicInUseIndicatorStyle = .orangePill
     var autoYieldOnRepeatedOverride: Bool = true

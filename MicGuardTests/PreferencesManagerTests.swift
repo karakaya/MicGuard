@@ -32,6 +32,76 @@ final class PreferencesManagerTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Legacy Migration Tests
+
+    func testLegacyVolumeLockMigrates() {
+        // Old-version user: legacy keys present, new strategy key absent.
+        // registerDefaults() used to run before migration, making the nil-guard
+        // permanently false — these settings were silently dropped.
+        let suite = "com.micguard.tests.migration"
+        let legacyDefaults = UserDefaults(suiteName: suite)!
+        legacyDefaults.removePersistentDomain(forName: suite)
+        legacyDefaults.set(true, forKey: "InputVolumeLockEnabled")
+        legacyDefaults.set(Float(0.5), forKey: "LockedInputVolume")
+
+        let manager = PreferencesManager(defaults: legacyDefaults)
+
+        XCTAssertEqual(manager.volumeControlStrategy, .lockVolume,
+                       "Legacy volume lock must migrate to the lockVolume strategy")
+        XCTAssertEqual(manager.targetVolume, 0.5, accuracy: 0.001,
+                       "Legacy locked volume must migrate to targetVolume")
+        XCTAssertNil(legacyDefaults.object(forKey: "InputVolumeLockEnabled"),
+                     "Legacy keys must be cleaned up after migration")
+        legacyDefaults.removePersistentDomain(forName: suite)
+    }
+
+    func testLegacyAutoResetMigrates() {
+        let suite = "com.micguard.tests.migration2"
+        let legacyDefaults = UserDefaults(suiteName: suite)!
+        legacyDefaults.removePersistentDomain(forName: suite)
+        legacyDefaults.set(true, forKey: "AutoResetEnabled")
+        legacyDefaults.set(Float(0.6), forKey: "DefaultResetVolume")
+
+        let manager = PreferencesManager(defaults: legacyDefaults)
+
+        XCTAssertEqual(manager.volumeControlStrategy, .resetWhenMicStops)
+        XCTAssertEqual(manager.targetVolume, 0.6, accuracy: 0.001)
+        legacyDefaults.removePersistentDomain(forName: suite)
+    }
+
+    func testLegacyKeysDoNotOverrideAlreadyPersistedStrategy() {
+        // User configured the new strategy while the migration was dead code —
+        // lingering legacy keys must not clobber it, and must still be cleaned up.
+        let suite = "com.micguard.tests.migration3"
+        let legacyDefaults = UserDefaults(suiteName: suite)!
+        legacyDefaults.removePersistentDomain(forName: suite)
+        legacyDefaults.set(true, forKey: "InputVolumeLockEnabled")
+        legacyDefaults.set(Float(0.5), forKey: "LockedInputVolume")
+        legacyDefaults.set(VolumeControlStrategy.none.rawValue, forKey: "VolumeControlStrategy")
+
+        let manager = PreferencesManager(defaults: legacyDefaults)
+
+        XCTAssertEqual(manager.volumeControlStrategy, .none,
+                       "A persisted strategy must survive the legacy migration")
+        XCTAssertNil(legacyDefaults.object(forKey: "InputVolumeLockEnabled"),
+                     "Legacy keys must still be cleaned up")
+        legacyDefaults.removePersistentDomain(forName: suite)
+    }
+
+    func testAppPausedPersistence() {
+        XCTAssertFalse(preferencesManager.appPaused, "App must not start paused by default")
+        preferencesManager.appPaused = true
+        XCTAssertTrue(preferencesManager.appPaused)
+        XCTAssertTrue(testDefaults.bool(forKey: "AppPaused"))
+    }
+
+    func testFreshInstallKeepsRegisteredDefaultStrategy() {
+        // No legacy keys: migration must not run, or a fresh install would be
+        // forced to .none instead of the registered resetWhenMicStops default.
+        XCTAssertEqual(preferencesManager.volumeControlStrategy, .resetWhenMicStops)
+        XCTAssertEqual(preferencesManager.targetVolume, 0.75, accuracy: 0.001)
+    }
+
     // MARK: - Default Values Tests
 
     func testDefaultValues() {

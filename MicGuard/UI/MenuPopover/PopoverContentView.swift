@@ -36,36 +36,46 @@ struct PopoverContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StatusSection(viewModel: viewModel, tab: selectedTab)
+            MasterToggleRow(viewModel: viewModel)
                 .padding(.horizontal, 16)
                 .padding(.top, 14)
                 .padding(.bottom, 12)
 
-            TabBar(selectedTab: $selectedTab)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 4)
-
             Divider()
+                .padding(.bottom, 12)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    switch selectedTab {
-                    case .input:
-                        InputSection(viewModel: viewModel)
-                    case .output:
-                        OutputSection(viewModel: viewModel)
-                    case .settings:
-                        SettingsSection(viewModel: viewModel)
-                        if viewModel.showStats {
-                            Divider()
-                            StatsSection(viewModel: viewModel)
+            // Everything below the master toggle is inert and dimmed while paused —
+            // the app is visibly "off", and nothing can be changed until resumed.
+            Group {
+                StatusSection(viewModel: viewModel, tab: selectedTab)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+
+                TabBar(selectedTab: $selectedTab)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        switch selectedTab {
+                        case .input:
+                            InputSection(viewModel: viewModel)
+                        case .output:
+                            OutputSection(viewModel: viewModel)
+                        case .settings:
+                            SettingsSection(viewModel: viewModel)
                         }
                     }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 500, maxHeight: 620)
             }
-            .frame(minHeight: 500, maxHeight: 620)
+            .disabled(viewModel.appPaused)
+            .opacity(viewModel.appPaused ? 0.45 : 1)
+            .animation(.easeOut(duration: 0.15), value: viewModel.appPaused)
 
             Divider()
             FooterBar(viewModel: viewModel)
@@ -73,6 +83,40 @@ struct PopoverContentView: View {
                 .padding(.vertical, 10)
         }
         .frame(width: 360)
+    }
+}
+
+// MARK: - Master toggle
+
+/// The app's kill switch — fixed above every tab. Off = every protection
+/// stops, the UI below dims, and the menu-bar mic shows a slash.
+private struct MasterToggleRow: View {
+    @ObservedObject var viewModel: PopoverViewModel
+
+    var body: some View {
+        Toggle(isOn: Binding(
+            get: { !viewModel.appPaused },
+            set: { viewModel.setAppPaused(!$0) }
+        )) {
+            HStack(spacing: 10) {
+                Image(systemName: viewModel.appPaused ? "mic.slash.fill" : "shield.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(viewModel.appPaused ? .secondary : .green)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("MicGuard")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(viewModel.appPaused ? "Off — nothing is enforced" : "On — protecting your devices")
+                        .font(.system(size: 11))
+                        .foregroundColor(viewModel.appPaused ? .orange : .secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .toggleStyle(.switch)
+        .help(viewModel.appPaused
+              ? "Turn MicGuard back on"
+              : "Turn MicGuard off — all protections stop until you turn it back on")
     }
 }
 
@@ -152,13 +196,26 @@ private struct StatusSection: View {
             }
 
             HStack(spacing: 6) {
-                Image(systemName: isLocked ? "lock.fill" : "lock.open")
-                    .foregroundColor(isLocked ? .green : .secondary)
+                Image(systemName: lockIcon)
+                    .foregroundColor(lockIconColor)
                     .font(.system(size: 11))
                 Text(lockText)
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
+                if isLocked && isYielded {
+                    Spacer()
+                    Button("Resume") {
+                        if showsOutput {
+                            viewModel.resumeOutputProtection()
+                        } else {
+                            viewModel.resumeInputProtection()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Re-arm enforcement of your priority list")
+                }
             }
         }
     }
@@ -182,14 +239,72 @@ private struct StatusSection: View {
         showsOutput ? viewModel.outputDeviceLockEnabled : viewModel.inputDeviceLockEnabled
     }
 
+    private var isYielded: Bool {
+        showsOutput ? viewModel.isOutputYielded : viewModel.isInputYielded
+    }
+
+    private var lockIcon: String {
+        if isLocked && isYielded { return "pause.circle.fill" }
+        return isLocked ? "lock.fill" : "lock.open"
+    }
+
+    private var lockIconColor: Color {
+        if isLocked && isYielded { return .orange }
+        return isLocked ? .green : .secondary
+    }
+
     private var lockText: String {
         if isLocked {
+            if isYielded {
+                return "Paused — you chose a different device"
+            }
             let name = showsOutput
                 ? (viewModel.preferredOutputDisplayName ?? "preferred device")
                 : (viewModel.preferredInputDisplayName ?? "preferred device")
             return "Enforcing priority · \(name)"
         }
         return "No lock — devices may auto-switch"
+    }
+}
+
+// MARK: - Fight offer banner
+
+/// Shown when a watchdog keeps blocking repeated switches to the same device.
+/// Enforcement continues until the user explicitly picks "Stop fighting".
+struct FightOfferBanner: View {
+    let offer: FightOffer
+    let onStopFighting: () -> Void
+    let onKeepProtecting: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 12))
+                Text("Something keeps switching to \(offer.attemptedName)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("MicGuard is holding \(offer.preferredName). If this is you, MicGuard can stop fighting until you resume the lock.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Keep holding", action: onKeepProtecting)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Use \(offer.attemptedName)", action: onStopFighting)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.orange.opacity(0.1))
+        )
     }
 }
 
@@ -200,6 +315,14 @@ private struct InputSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let offer = viewModel.inputFightOffer {
+                FightOfferBanner(
+                    offer: offer,
+                    onStopFighting: { viewModel.acceptInputFightOffer() },
+                    onKeepProtecting: { viewModel.dismissInputFightOffer() }
+                )
+            }
+
             Toggle(isOn: Binding(
                 get: { viewModel.inputDeviceLockEnabled },
                 set: { viewModel.setInputDeviceLockEnabled($0) }
@@ -377,6 +500,14 @@ private struct OutputSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let offer = viewModel.outputFightOffer {
+                FightOfferBanner(
+                    offer: offer,
+                    onStopFighting: { viewModel.acceptOutputFightOffer() },
+                    onKeepProtecting: { viewModel.dismissOutputFightOffer() }
+                )
+            }
+
             Toggle(isOn: Binding(
                 get: { viewModel.outputDeviceLockEnabled },
                 set: { viewModel.setOutputDeviceLockEnabled($0) }
@@ -679,44 +810,6 @@ private struct SettingsSection: View {
             .controlSize(.small)
 
             Toggle(isOn: Binding(
-                get: { viewModel.showNotifications },
-                set: { viewModel.setShowNotifications($0) }
-            )) {
-                Text("Show notifications")
-                    .font(.system(size: 13))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Toggle(isOn: Binding(
-                get: { viewModel.showStats },
-                set: { viewModel.setShowStats($0) }
-            )) {
-                Text("Show stats")
-                    .font(.system(size: 13))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Toggle(isOn: Binding(
-                get: { viewModel.autoYieldOnRepeatedOverride },
-                set: { viewModel.setAutoYieldOnRepeatedOverride($0) }
-            )) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Stop fighting after 2 manual overrides")
-                        .font(.system(size: 13))
-                    Text("Yields to your manual changes until you click Re-apply")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            Toggle(isOn: Binding(
                 get: { viewModel.autoResumeOnTopPriorityPick },
                 set: { viewModel.setAutoResumeOnTopPriorityPick($0) }
             )) {
@@ -851,12 +944,29 @@ private struct StatsSection: View {
 
 private struct FooterBar: View {
     @ObservedObject var viewModel: PopoverViewModel
+    @State private var showStatsPopover = false
 
     var body: some View {
         HStack {
             Button("About") { viewModel.showAbout() }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
+
+            // Stats render in a transient popover, not inline — they're
+            // diagnostic info and shouldn't grow the app UI.
+            Button(action: { showStatsPopover.toggle() }) {
+                Text("Stats")
+                    .font(.system(size: 11, weight: .light))
+                    .foregroundColor(.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Show hijacks blocked, volume corrections, and more")
+            .popover(isPresented: $showStatsPopover, arrowEdge: .top) {
+                StatsSection(viewModel: viewModel)
+                    .padding(14)
+                    .frame(width: 260)
+            }
+
             Spacer()
             Button(action: viewModel.quit) {
                 Label("Quit MicGuard", systemImage: "power")

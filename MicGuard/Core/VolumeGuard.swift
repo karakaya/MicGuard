@@ -43,9 +43,16 @@ class VolumeGuard: VolumeGuardProtocol {
     private let maxCorrectionsPerWindow: Int = 10
     private let correctionWindowDuration: TimeInterval = 5.0
     
-    // Debounce
+    // Debounce with a hard deadline: rescheduling on every event alone lets any
+    // source that changes volume faster than the interval (conferencing auto-gain
+    // adjusts ~every second) postpone the correction forever. The deadline pins
+    // the correction to at most debounceInterval after the FIRST uncorrected drift.
     private var debounceWorkItem: DispatchWorkItem?
+    private var pendingCorrectionDeadline: Date?
     private let debounceInterval: TimeInterval
+
+    // Settle delay before snapping a newly-default device to the target volume.
+    private let deviceSwitchSettleDelay: TimeInterval = 0.5
     
     // Volume tolerance (to prevent float comparison issues)
     private let volumeTolerance: Float = 0.01
@@ -99,10 +106,13 @@ class VolumeGuard: VolumeGuardProtocol {
         
         isGuarding = true
         
-        // Watch for default device changes to re-attach listener
+        // Watch for default device changes to re-attach the listener AND re-apply
+        // the target: the newly-default device carries whatever volume it last had,
+        // and no volume event fires until some other actor touches it.
         audioDeviceManager.defaultInputChangedPublisher
             .sink { [weak self] _ in
                 self?.reattachVolumeListener()
+                self?.enforceTargetAfterDeviceSwitch()
             }
             .store(in: &cancellables)
         
@@ -120,7 +130,8 @@ class VolumeGuard: VolumeGuardProtocol {
         cancellables.removeAll()
         debounceWorkItem?.cancel()
         debounceWorkItem = nil
-        
+        pendingCorrectionDeadline = nil
+
     }
     
     func updateTargetVolume(_ volume: Float) {
@@ -213,10 +224,35 @@ class VolumeGuard: VolumeGuardProtocol {
         guard isGuarding else { return }
         attachVolumeListener()
     }
+
+    /// Snap a newly-default device to the target after a short settle delay.
+    /// Without this, enforcement after a device switch is reactive-only: a device
+    /// left at 20% by some app stays there until another actor trips the listener.
+    private func enforceTargetAfterDeviceSwitch() {
+        guard isGuarding else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + deviceSwitchSettleDelay) { [weak self] in
+            guard let self = self, self.isGuarding,
+                  let device = self.audioDeviceManager.defaultInputDevice,
+                  let currentVolume = self.audioDeviceManager.getInputVolume(for: device),
+                  abs(currentVolume - self.targetVolume) > self.volumeTolerance,
+                  !self.shouldThrottle() else { return }
+
+            self.isSettingVolume = true
+            let success = self.audioDeviceManager.setInputVolume(self.targetVolume, for: device)
+            self.isSettingVolume = false
+
+            if success {
+                self.recordCorrection()
+                self.onVolumeCorrected?(currentVolume, self.targetVolume)
+            }
+        }
+    }
     
     // MARK: - Private Methods - Volume Enforcement
     
-    private func handleVolumeChange() {
+    // internal (not private) so tests can drive volume-change events — the real
+    // trigger is a CoreAudio listener the mock layer can't fire.
+    func handleVolumeChange() {
         guard isGuarding,
               let device = audioDeviceManager.defaultInputDevice,
               let currentVolume = audioDeviceManager.getInputVolume(for: device) else { return }
@@ -229,11 +265,13 @@ class VolumeGuard: VolumeGuardProtocol {
         // Check anti-fight mechanism
         if shouldThrottle() { return }
         
-        // Debounce the correction
+        // Debounce the correction, capped by the deadline set at the first
+        // uncorrected drift — continued churn cannot postpone it past that.
         debounceWorkItem?.cancel()
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            self.pendingCorrectionDeadline = nil
 
             // Re-fetch at fire time: the default device may have changed (or gone)
             // during the debounce window, and the drift may already be resolved.
@@ -255,9 +293,13 @@ class VolumeGuard: VolumeGuardProtocol {
                 }
             }
         }
-        
+
         debounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+        let now = Date()
+        let deadline = pendingCorrectionDeadline ?? now.addingTimeInterval(debounceInterval)
+        pendingCorrectionDeadline = deadline
+        let delay = max(0, deadline.timeIntervalSince(now))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
     
     // MARK: - Anti-Fight Mechanism

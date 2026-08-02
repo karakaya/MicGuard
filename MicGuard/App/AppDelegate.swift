@@ -93,7 +93,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let audioManager = audioDeviceManager else { return }
 
         deviceWatchdog = DeviceWatchdog(audioDeviceManager: audioManager)
-        deviceWatchdog?.autoYieldEnabled = preferencesManager.autoYieldOnRepeatedOverride
         deviceWatchdog?.autoResumeEnabled = preferencesManager.autoResumeOnTopPriorityPick
         deviceWatchdog?.isDeviceUsable = { [weak self] device in
             self?.isUsableInput(device) ?? true
@@ -113,14 +112,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.statusBarController?.flashLabel("INPUT HELD")
         }
 
+        deviceWatchdog?.onFightDetected = { attempted, preferred in
+            MGLog.debug("[MicGuard.AppDelegate] input fight detected — \(attempted) vs \(preferred)")
+            NotificationCenter.default.post(name: .watchdogFightDetected, object: nil, userInfo: [
+                "direction": "input", "attempted": attempted, "preferred": preferred,
+            ])
+        }
+
         deviceWatchdog?.onYielded = { [weak self] accepted, _ in
             MGLog.debug("[MicGuard.AppDelegate] INPUT CHANGED — yielded to \(accepted)")
             self?.statusBarController?.flashLabel("INPUT CHANGED", background: .systemGreen)
+            NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                "direction": "input", "yielded": true,
+            ])
         }
 
         deviceWatchdog?.onProtectionResumed = { [weak self] in
             MGLog.debug("[MicGuard.AppDelegate] INPUT LOCK ON — protection resumed")
             self?.statusBarController?.flashLabel("INPUT LOCK ON", background: .systemGreen)
+            NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                "direction": "input", "yielded": false,
+            ])
         }
 
         deviceWatchdog?.onDeviceMatchAmbiguous = { _, _ in
@@ -132,7 +144,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let audioManager = audioDeviceManager else { return }
 
         outputDeviceWatchdog = OutputDeviceWatchdog(audioDeviceManager: audioManager)
-        outputDeviceWatchdog?.autoYieldEnabled = preferencesManager.autoYieldOnRepeatedOverride
         outputDeviceWatchdog?.autoResumeEnabled = preferencesManager.autoResumeOnTopPriorityPick
 
         outputDeviceWatchdog?.nameForUID = { [weak self] uid in
@@ -148,14 +159,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.statusBarController?.flashLabel("OUTPUT HELD")
         }
 
+        outputDeviceWatchdog?.onFightDetected = { attempted, preferred in
+            MGLog.debug("[MicGuard.AppDelegate] output fight detected — \(attempted) vs \(preferred)")
+            NotificationCenter.default.post(name: .watchdogFightDetected, object: nil, userInfo: [
+                "direction": "output", "attempted": attempted, "preferred": preferred,
+            ])
+        }
+
         outputDeviceWatchdog?.onYielded = { [weak self] accepted, _ in
             MGLog.debug("[MicGuard.AppDelegate] OUTPUT CHANGED — yielded to \(accepted)")
             self?.statusBarController?.flashLabel("OUTPUT CHANGED", background: .systemGreen)
+            NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                "direction": "output", "yielded": true,
+            ])
         }
 
         outputDeviceWatchdog?.onProtectionResumed = { [weak self] in
             MGLog.debug("[MicGuard.AppDelegate] OUTPUT LOCK ON — protection resumed")
             self?.statusBarController?.flashLabel("OUTPUT LOCK ON", background: .systemGreen)
+            NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                "direction": "output", "yielded": false,
+            ])
         }
 
         outputDeviceWatchdog?.onDeviceMatchAmbiguous = { _, _ in
@@ -198,6 +222,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func applyStoredPreferences() {
         MGLog.debug("[MicGuard.App] applyStoredPreferences: lockEnabled=\(preferencesManager.inputDeviceLockEnabled) priority=\(preferencesManager.preferredInputDeviceOrder)")
+        // Master pause: nothing enforces. ActivityMonitor stays on — the On Air
+        // indicator is passive observation, not enforcement.
+        guard !preferencesManager.appPaused else {
+            activityMonitor?.startMonitoring()
+            MGLog.debug("[MicGuard.App] applyStoredPreferences: app is PAUSED — no guards started")
+            return
+        }
         // Apply input device lock if enabled
         if preferencesManager.inputDeviceLockEnabled {
             let priorityOrder = preferencesManager.preferredInputDeviceOrder
@@ -226,10 +257,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyVolumeControlStrategy() {
         let strategy = preferencesManager.volumeControlStrategy
         let targetVol = preferencesManager.targetVolume
-        
+
         // ActivityMonitor ALWAYS runs (for ON AIR indicator and input level display)
         activityMonitor?.startMonitoring()
-        
+
+        guard !preferencesManager.appPaused else {
+            volumeGuard?.stopGuarding()
+            return
+        }
+
         switch strategy {
         case .none:
             volumeGuard?.stopGuarding()
@@ -251,6 +287,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleInputAutoSwitch()
                 self?.handleOutputAutoSwitch()
                 self?.updateActivityMonitorDeviceOverride()
+                self?.scheduleDelayedAutoSwitchChecks()
             }
             .store(in: &cancellables)
 
@@ -266,6 +303,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.outputDeviceWatchdog?.resumeProtection()
+            }
+            .store(in: &cancellables)
+
+        // User accepted the "stop fighting?" offer — yield deliberately, and if the
+        // offer named the device they were trying to use, switch to it for them.
+        NotificationCenter.default.publisher(for: .userRequestedYieldInputProtection)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self else { return }
+                self.deviceWatchdog?.yieldNow()
+                if let name = notification.userInfo?["deviceName"] as? String,
+                   let device = self.audioDeviceManager?.inputDevices(withName: name).first {
+                    _ = self.audioDeviceManager?.setDefaultInputDevice(device)
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .userRequestedYieldOutputProtection)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self else { return }
+                self.outputDeviceWatchdog?.yieldNow()
+                if let name = notification.userInfo?["deviceName"] as? String,
+                   let device = self.audioDeviceManager?.outputDevices(withName: name).first {
+                    _ = self.audioDeviceManager?.setDefaultOutputDevice(device)
+                }
             }
             .store(in: &cancellables)
 
@@ -297,11 +360,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self,
                   let _ = notification.object as? String else { return }
 
-            // Update device watchdog if enabled
-            if self.preferencesManager.inputDeviceLockEnabled {
-                self.deviceWatchdog?.stopWatching()
+            // Update device watchdog if enabled. A running watchdog gets the new
+            // order in place — a stop/start cycle would wipe yielded state and the
+            // override counter, so any list edit would silently re-arm enforcement.
+            if self.preferencesManager.inputDeviceLockEnabled, !self.preferencesManager.appPaused {
                 let priorityOrder = self.preferencesManager.preferredInputDeviceOrder
-                if !priorityOrder.isEmpty {
+                if priorityOrder.isEmpty {
+                    self.deviceWatchdog?.stopWatching()
+                    // stopWatching clears yield without firing onProtectionResumed —
+                    // sync the popover mirror so it doesn't show a dead "Paused".
+                    NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                        "direction": "input", "yielded": false,
+                    ])
+                } else if self.deviceWatchdog?.isWatching == true {
+                    self.deviceWatchdog?.updateDevicePriorityOrder(priorityOrder)
+                } else {
                     self.deviceWatchdog?.startWatching(devicePriorityOrder: priorityOrder)
                 }
             }
@@ -316,11 +389,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self,
                   let _ = notification.object as? String else { return }
 
-            // Update output device watchdog if enabled
-            if self.preferencesManager.outputDeviceLockEnabled {
-                self.outputDeviceWatchdog?.stopWatching()
+            // Update output device watchdog if enabled — same in-place update as input
+            // so yielded state survives list edits.
+            if self.preferencesManager.outputDeviceLockEnabled, !self.preferencesManager.appPaused {
                 let priorityOrder = self.preferencesManager.preferredOutputDeviceOrder
-                if !priorityOrder.isEmpty {
+                if priorityOrder.isEmpty {
+                    self.outputDeviceWatchdog?.stopWatching()
+                    NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                        "direction": "output", "yielded": false,
+                    ])
+                } else if self.outputDeviceWatchdog?.isWatching == true {
+                    self.outputDeviceWatchdog?.updateDevicePriorityOrder(priorityOrder)
+                } else {
                     self.outputDeviceWatchdog?.startWatching(devicePriorityOrder: priorityOrder)
                 }
             }
@@ -335,9 +415,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return device.transportType != kAudioDeviceTransportTypeBuiltIn
     }
 
+    /// macOS often routes the default AFTER the device-list event — AirPods finish
+    /// HFP negotiation 2-5s post-connect and only then flip the default input.
+    /// Auto-switch at the list event alone sees "already on the top device" and
+    /// does nothing, so the late flip wins. Re-run a few times so the settled
+    /// routing loses to the priority order (mirrors the watchdog's delayed checks).
+    private func scheduleDelayedAutoSwitchChecks() {
+        for delay in [0.5, 2.0, 5.0] {
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                self?.handleInputAutoSwitch()
+                self?.handleOutputAutoSwitch()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
     private func handleInputAutoSwitch() {
-        guard preferencesManager.inputAutoSwitchEnabled,
+        guard !preferencesManager.appPaused,
+              preferencesManager.inputAutoSwitchEnabled,
               let audioManager = audioDeviceManager else { return }
+
+        // Respect a yielded lock: the user deliberately chose a non-preferred
+        // device — unrelated device-list churn must not snatch it back.
+        guard deviceWatchdog?.isYielded != true else { return }
 
         let priorityOrder = preferencesManager.preferredInputDeviceOrder
         guard !priorityOrder.isEmpty else { return }
@@ -370,7 +470,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyDefaultVolumeIfSet(for device: AudioDevice?) {
-        guard let device = device,
+        guard !preferencesManager.appPaused,
+              let device = device,
               let manager = audioDeviceManager,
               let target = preferencesManager.outputDeviceVolume(for: device.uid) else { return }
         let ok = manager.setOutputVolume(target, for: device)
@@ -378,8 +479,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleOutputAutoSwitch() {
-        guard preferencesManager.outputAutoSwitchEnabled,
+        guard !preferencesManager.appPaused,
+              preferencesManager.outputAutoSwitchEnabled,
               let audioManager = audioDeviceManager else { return }
+
+        // Respect a yielded lock — same rationale as handleInputAutoSwitch.
+        guard outputDeviceWatchdog?.isYielded != true else { return }
 
         let priorityOrder = preferencesManager.preferredOutputDeviceOrder
         guard !priorityOrder.isEmpty else { return }
@@ -415,6 +520,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// When the input lock is active, we track the locked device directly so the indicator stays
     /// correct even if macOS briefly switches the system default to AirPods.
     private func updateActivityMonitorDeviceOverride() {
+        // While paused nothing is enforced, so the "locked device" concept doesn't
+        // apply — monitor the actual system default for the On Air indicator.
+        guard !preferencesManager.appPaused else {
+            activityMonitor?.overrideMonitoredDevice = nil
+            return
+        }
         guard preferencesManager.inputDeviceLockEnabled else {
             activityMonitor?.overrideMonitoredDevice = nil
             MGLog.debug("[MicGuard.App] override cleared (lock disabled)")
@@ -457,7 +568,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Handle Input Device Lock Toggle
         if key == "InputDeviceLockEnabled" {
-            if preferencesManager.inputDeviceLockEnabled {
+            if preferencesManager.inputDeviceLockEnabled, !preferencesManager.appPaused {
                 let priorityOrder = preferencesManager.preferredInputDeviceOrder
                 if !priorityOrder.isEmpty {
                     deviceWatchdog?.startWatching(devicePriorityOrder: priorityOrder)
@@ -468,15 +579,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             updateActivityMonitorDeviceOverride()
         }
 
-        // Handle auto-yield toggle change
-        if key == "AutoYieldOnRepeatedOverride" {
-            let enabled = preferencesManager.autoYieldOnRepeatedOverride
-            deviceWatchdog?.autoYieldEnabled = enabled
-            outputDeviceWatchdog?.autoYieldEnabled = enabled
-            // Turning auto-yield off shouldn't leave a stale yielded state.
-            if !enabled {
-                deviceWatchdog?.resumeProtection()
-                outputDeviceWatchdog?.resumeProtection()
+        // Handle master pause toggle
+        if key == "AppPaused" {
+            if preferencesManager.appPaused {
+                deviceWatchdog?.stopWatching()
+                outputDeviceWatchdog?.stopWatching()
+                volumeGuard?.stopGuarding()
+                updateActivityMonitorDeviceOverride()
+                // stopWatching clears yield internally without firing callbacks.
+                for direction in ["input", "output"] {
+                    NotificationCenter.default.post(name: .watchdogYieldStateChanged, object: nil, userInfo: [
+                        "direction": direction, "yielded": false,
+                    ])
+                }
+                MGLog.debug("[MicGuard.App] paused — all enforcement stopped")
+            } else {
+                MGLog.debug("[MicGuard.App] resumed — re-applying stored preferences")
+                applyStoredPreferences()
             }
         }
 
@@ -489,7 +608,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Handle Output Device Lock Toggle
         if key == "OutputDeviceLockEnabled" {
-            if preferencesManager.outputDeviceLockEnabled {
+            if preferencesManager.outputDeviceLockEnabled, !preferencesManager.appPaused {
                 let priorityOrder = preferencesManager.preferredOutputDeviceOrder
                 if !priorityOrder.isEmpty {
                     outputDeviceWatchdog?.startWatching(devicePriorityOrder: priorityOrder)
