@@ -25,6 +25,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let statsManager = StatsManager.shared
     
     private var cancellables = Set<AnyCancellable>()
+
+    // Auto-switch grab correction state, per grabbing UID. Repeat-grab TIMING
+    // decides intent: macOS re-asserts its routing within ~0.5s of a correction
+    // (observed with AirPods HFP), while a human re-picking in System Settings
+    // takes seconds. Sub-second repeats are machine → correct again (bounded);
+    // 1-15s repeats are a human insisting → respect.
+    private var inputGrabCorrections: [String: (lastAt: Date, count: Int)] = [:]
+    private let grabHumanMinDelay: TimeInterval = 1.0
+    private let grabRespectWindow: TimeInterval = 15.0
+    private let grabMaxCorrections = 3
     
     // MARK: - App Lifecycle
     
@@ -332,6 +342,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // Auto-switch, grab-correction path: AirPods wear detection re-routes the
+        // default input WITHOUT any device-list event (the device never
+        // disconnects), so the connect-driven path above never sees it. Watch the
+        // default itself and snap back to the top priority — once per grab.
+        audioDeviceManager?.defaultInputChangedPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] device in
+                self?.handleInputDefaultGrab(device)
+            }
+            .store(in: &cancellables)
+
         // Apply per-device output volume when the system output changes.
         // Set-once-on-activation semantic: we nudge the device's volume to the
         // user's saved default exactly once when it becomes the default output,
@@ -423,6 +444,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func scheduleDelayedAutoSwitchChecks() {
         for delay in [0.5, 2.0, 5.0] {
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                MGLog.debug("[MicGuard.AutoSwitch] delayed re-check (+\(delay)s after device-list change)")
                 self?.handleInputAutoSwitch()
                 self?.handleOutputAutoSwitch()
             }
@@ -430,7 +452,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Correct a system grab of the default input (wear detection, app routing)
+    /// back to the top priority. Applies only when auto-switch is on and the
+    /// input lock is off — the lock's watchdog owns this job otherwise.
+    /// One-shot per device: a repeat grab inside `grabRespectWindow` is treated
+    /// as a deliberate user pick and left alone, so this never fights a human.
+    private func handleInputDefaultGrab(_ newDevice: AudioDevice?) {
+        guard !preferencesManager.appPaused,
+              preferencesManager.inputAutoSwitchEnabled,
+              !preferencesManager.inputDeviceLockEnabled,
+              let newDevice = newDevice,
+              let audioManager = audioDeviceManager else { return }
+
+        guard let best = bestAutoSwitchInput(), best.uid != newDevice.uid else { return }
+
+        if let prior = inputGrabCorrections[newDevice.uid] {
+            let delta = Date().timeIntervalSince(prior.lastAt)
+            if delta >= grabHumanMinDelay, delta < grabRespectWindow {
+                // Human-speed re-pick: they want this device. Stand down.
+                MGLog.debug("[MicGuard.AutoSwitch] grab of \(newDevice.name) repeated at human speed (\(String(format: "%.1f", delta))s) — respecting as a deliberate pick")
+                inputGrabCorrections[newDevice.uid] = nil
+                return
+            }
+            if delta < grabHumanMinDelay, prior.count >= grabMaxCorrections {
+                // Machine keeps re-asserting sub-second; don't fight forever.
+                MGLog.debug("[MicGuard.AutoSwitch] grab of \(newDevice.name) re-asserted \(prior.count)x — standing down this episode")
+                return
+            }
+            if delta >= grabRespectWindow {
+                // Stale episode — start fresh.
+                inputGrabCorrections[newDevice.uid] = nil
+            }
+        }
+
+        let count = (inputGrabCorrections[newDevice.uid]?.count ?? 0) + 1
+        MGLog.debug("[MicGuard.AutoSwitch] correcting system grab (\(count)/\(grabMaxCorrections)): \(newDevice.name) → \(best.name)")
+        inputGrabCorrections[newDevice.uid] = (Date(), count)
+        _ = audioManager.setDefaultInputDevice(best)
+        // "KEPT", not "SWITCHED": from the user's view nothing moved — their
+        // priority device stayed put. SWITCHED is reserved for routing to a
+        // newly connected device; HELD (red) for the lock blocking a hijack.
+        statusBarController?.flashLabel("INPUT KEPT", background: .systemGreen)
+    }
+
+    /// Highest-priority connected, usable input device — shared by the
+    /// connect-driven auto-switch and the grab-correction path.
+    private func bestAutoSwitchInput() -> AudioDevice? {
+        guard let audioManager = audioDeviceManager else { return nil }
+        for uid in preferencesManager.preferredInputDeviceOrder {
+            if let device = audioManager.device(forUID: uid), device.isInput, isUsableInput(device) {
+                return device
+            }
+            if let name = preferencesManager.cachedDeviceName(for: uid) {
+                let matches = audioManager.inputDevices(withName: name)
+                if matches.count == 1, isUsableInput(matches[0]) {
+                    preferencesManager.replaceDeviceUID(oldUID: uid, newUID: matches[0].uid)
+                    return matches[0]
+                }
+            }
+        }
+        return nil
+    }
+
     private func handleInputAutoSwitch() {
+        MGLog.debug("[MicGuard.AutoSwitch] input check: paused=\(preferencesManager.appPaused) enabled=\(preferencesManager.inputAutoSwitchEnabled) yielded=\(deviceWatchdog?.isYielded == true) current=\(audioDeviceManager?.defaultInputDevice?.name ?? "nil")")
         guard !preferencesManager.appPaused,
               preferencesManager.inputAutoSwitchEnabled,
               let audioManager = audioDeviceManager else { return }
@@ -439,25 +524,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // device — unrelated device-list churn must not snatch it back.
         guard deviceWatchdog?.isYielded != true else { return }
 
-        let priorityOrder = preferencesManager.preferredInputDeviceOrder
-        guard !priorityOrder.isEmpty else { return }
+        let bestDevice = bestAutoSwitchInput()
 
-        var bestDevice: AudioDevice?
-        for uid in priorityOrder {
-            if let device = audioManager.device(forUID: uid), device.isInput, isUsableInput(device) {
-                bestDevice = device
-                break
-            }
-            if let name = preferencesManager.cachedDeviceName(for: uid) {
-                let matches = audioManager.inputDevices(withName: name)
-                if matches.count == 1, isUsableInput(matches[0]) {
-                    bestDevice = matches[0]
-                    preferencesManager.replaceDeviceUID(oldUID: uid, newUID: matches[0].uid)
-                    break
-                }
-            }
-        }
-
+        MGLog.debug("[MicGuard.AutoSwitch] input resolve: best=\(bestDevice?.name ?? "nil (no priority device connected/usable)") current=\(audioManager.defaultInputDevice?.name ?? "nil")")
         guard let target = bestDevice,
               let current = audioManager.defaultInputDevice,
               current.uid != target.uid else { return }
