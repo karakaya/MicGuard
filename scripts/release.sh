@@ -74,7 +74,8 @@ xcrun stapler staple "$DMG"
 spctl --assess --type open --context context:primary-signature -v "$DMG"
 
 echo "==> Committing, tagging, pushing"
-git add "$PLIST" project.yml MicGuard.xcodeproj
+# project.yml is gitignored — adding it aborts the script mid-release.
+git add "$PLIST" MicGuard.xcodeproj
 git commit -m "Release v$VERSION"
 git tag "v$VERSION"
 git push origin HEAD "v$VERSION"
